@@ -1,0 +1,17 @@
+# Backend Dependencies
+Flask==3.0.2
+flask-cors==4.0.0
+PyMuPDF==1.23.26
+python-dotenv==1.0.1
+Werkzeug==3.0.1
+
+# Frontend Dependencies (package.json)
+# {
+#   "dependencies": {
+#     "react": "^18.2.0",
+#     "react-dom": "^18.2.0",
+#     "react-pdf": "^7.7.0",
+#     "@vitejs/plugin-react": "^4.2.1",
+#     "vite": "^5.1.4"
+#   }
+# } 
