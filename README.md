@@ -1,4 +1,4 @@
-# Skim2 - PDF Analysis Tool
+# Skim - PDF Analysis Tool
 
 A powerful React-based tool for analyzing PDF documents, extracting text blocks, and performing semantic analysis of academic content.
 
