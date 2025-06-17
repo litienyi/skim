@@ -191,4 +191,4 @@ This project relies on several open-source packages and tools:
 
 ## Academic Honesty Disclaimer
 
-This project was almost entirely built using Cursor, an AI code assistant. While I have made some modifications and customizations, I do not claim intellectual authorship or ownership of the code beyond what I have actually done. The core architecture, implementation details, and many features were generated with the assistance of Cursor. That said, I have learned a lot about application architecture by observing Cursor at work, and this project could be interpreted as evidence of this learning experience.
+This project was extensively built using Cursor, an AI code assistant. I claim only creative authorship but not technical authorship over the code. That said, I have learned a lot about application architecture by observing Cursor at work, and this project could be interpreted as evidence of this learning experience.
