@@ -3,7 +3,7 @@ import 'react-pdf/dist/esm/Page/AnnotationLayer.css'
 import 'react-pdf/dist/esm/Page/TextLayer.css'
 import 'bootstrap/dist/css/bootstrap.min.css'
 import './App.css'
-import { useState, useEffect, memo, useCallback } from 'react'
+import { useState, useEffect, memo, useCallback, useMemo, useRef } from 'react'
 
 // Configure the worker to use the local file
 pdfjs.GlobalWorkerOptions.workerSrc = '/node_modules/pdfjs-dist/build/pdf.worker.min.mjs'
@@ -14,7 +14,8 @@ pdfjs.GlobalWorkerOptions.workerSrc = '/node_modules/pdfjs-dist/build/pdf.worker
 
 const API_URL = 'http://localhost:5001/api'
 
-function BlockOverlay({ blocks, scale, pageNumber }) {
+// Memoized BlockOverlay component to prevent unnecessary re-renders
+const BlockOverlay = memo(({ blocks, scale, pageNumber, onBlockClick, activatedTexts, pageScale, rhetoricalLabels }) => {
   if (!blocks || !blocks[pageNumber - 1]) return null;
 
   return (
@@ -30,33 +31,182 @@ function BlockOverlay({ blocks, scale, pageNumber }) {
         zIndex: 1000
       }}
     >
-      {blocks[pageNumber - 1].map((block) => (
-        <div
-          key={block.id}
-          className="block-box"
-          style={{
-            position: 'absolute',
-            left: `${block.bbox.x0 * scale}px`,
-            top: `${block.bbox.y0 * scale}px`,
-            width: `${(block.bbox.x1 - block.bbox.x0) * scale}px`,
-            height: `${(block.bbox.y1 - block.bbox.y0) * scale}px`,
-            border: '2px solid red',
-            backgroundColor: block.user_order ? 'rgba(0, 255, 0, 0.1)' : 'rgba(255, 0, 0, 0.1)',
-            pointerEvents: 'auto',
-            cursor: 'pointer',
-            zIndex: 1001
-          }}
-          onClick={() => handleBlockClick(pageNumber - 1, block.id - 1)}
-          title={`Block ${block.id}: ${block.text}`}
-        >
-          <span className="block-number">
-            {block.user_order ? `#${block.user_order}` : block.id}
-          </span>
-        </div>
-      ))}
+      {blocks[pageNumber - 1].map((block, blockIndex) => {
+        const isActive = block.user_order !== null;
+        const activatedBlock = activatedTexts.find(
+          item => item.pageIndex === pageNumber - 1 && item.blockIndex === block.id
+        );
+
+        return (
+          <div
+            key={`block-${pageNumber}-${blockIndex}`}
+            className="block-overlay"
+            style={{
+              position: 'absolute',
+              left: `${(block.bbox.x0 * pageScale) - 2}px`,
+              top: `${(block.bbox.y0 * pageScale) - 2}px`,
+              width: `${(block.bbox.x1 - block.bbox.x0) * pageScale + 4}px`,
+              height: `${(block.bbox.y1 - block.bbox.y0) * pageScale + 4}px`,
+              border: `2px solid ${isActive ? 'green' : 'grey'}`,
+              backgroundColor: isActive ? 'rgba(0, 255, 0, 0.1)' : 'rgba(128, 128, 128, 0.2)',
+              cursor: 'pointer',
+              zIndex: 1001,
+              pointerEvents: 'auto'
+            }}
+            onClick={() => onBlockClick(pageNumber - 1, blockIndex)}
+          >
+            {isActive && (
+              <div className="block-number" style={{
+                position: 'absolute',
+                top: '-20px',
+                left: '0',
+                backgroundColor: 'green',
+                color: 'white',
+                padding: '2px 6px',
+                borderRadius: '3px',
+                fontSize: '12px'
+              }}>
+                {block.user_order}
+              </div>
+            )}
+            
+            {/* Word bounding boxes and sentence starter icons */}
+            {isActive && activatedBlock && activatedBlock.word_positions && activatedBlock.word_positions.map((word, wordIndex) => {
+              const wordLeft = (word.bbox.x0 - block.bbox.x0) * pageScale;
+              const wordTop = (word.bbox.y0 - block.bbox.y0) * pageScale;
+              const wordWidth = (word.bbox.x1 - word.bbox.x0) * pageScale;
+              const wordHeight = (word.bbox.y1 - word.bbox.y0) * pageScale;
+              
+              return (
+                <div
+                  key={`word-${wordIndex}`}
+                  className="word-hover-area"
+                  style={{
+                    position: 'absolute',
+                    left: `${wordLeft}px`,
+                    top: `${wordTop}px`,
+                    width: `${wordWidth}px`,
+                    height: `${wordHeight}px`,
+                    cursor: 'pointer'
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    // Handle word click for adding markers
+                  }}
+                >
+                  {!word.is_sentence_starter && (
+                    <div 
+                      className="add-marker"
+                      style={{
+                        left: '-13px',
+                        top: '50%',
+                        transform: 'translateY(-50%)'
+                      }}
+                    >
+                      <div className="add-marker-circle">+</div>
+                      <div className="add-marker-triangle" />
+                    </div>
+                  )}
+                  {word.is_sentence_starter && (
+                    <div
+                      className="sentence-marker"
+                      style={{
+                        left: '-13px',
+                        top: '50%',
+                        transform: 'translateY(-50%)'
+                      }}
+                    >
+                      <div className="sentence-marker-circle">
+                        {word.sentence_number || '?'}
+                      </div>
+                      <div className="sentence-marker-triangle" />
+                      {rhetoricalLabels[word.sentence_number] && (
+                        <div className="rhetorical-label" style={{
+                          position: 'absolute',
+                          left: '20px',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          backgroundColor: 'rgba(255, 255, 255, 0.9)',
+                          padding: '8px 12px',
+                          borderRadius: '4px',
+                          fontSize: '12px',
+                          whiteSpace: 'nowrap',
+                          zIndex: 1004,
+                          boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+                          maxWidth: '300px',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis'
+                        }}>
+                          <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
+                            {rhetoricalLabels[word.sentence_number].function} ({rhetoricalLabels[word.sentence_number].relevance}%)
+                          </div>
+                          <div style={{ 
+                            fontSize: '11px', 
+                            color: '#666',
+                            whiteSpace: 'normal',
+                            maxHeight: '60px',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            display: '-webkit-box',
+                            WebkitLineClamp: 3,
+                            WebkitBoxOrient: 'vertical'
+                          }}>
+                            {rhetoricalLabels[word.sentence_number].text}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
     </div>
   );
-}
+});
+
+// Memoized Page component to prevent unnecessary re-renders
+const MemoizedPage = memo(({ pageNumber, scale, onLoadSuccess, onLoadError, onRenderSuccess, blocks, pageIndex, onBlockClick, activatedTexts, pageScale, rhetoricalLabels }) => {
+  return (
+    <div className="page-container position-relative" style={{
+      width: '100%',
+      height: 'auto',
+      display: 'flex',
+      justifyContent: 'center',
+      marginBottom: '0'
+    }}>
+      <div style={{ position: 'relative' }}>
+        <Page 
+          pageNumber={pageNumber} 
+          scale={scale}
+          onLoadSuccess={onLoadSuccess}
+          onLoadError={onLoadError}
+          loading={<div className="d-flex justify-content-center p-3"><div className="spinner-border spinner-border-sm" role="status"><span className="visually-hidden">Loading page {pageNumber}...</span></div></div>}
+          error={<div className="alert alert-danger m-3">Error loading page {pageNumber}!</div>}
+          className="pdf-page"
+          style={{
+            maxWidth: '100%',
+            height: 'auto'
+          }}
+          onRenderSuccess={onRenderSuccess}
+        />
+        {blocks && blocks[pageIndex] && (
+          <BlockOverlay 
+            blocks={blocks}
+            scale={scale}
+            pageNumber={pageNumber}
+            onBlockClick={onBlockClick}
+            activatedTexts={activatedTexts}
+            pageScale={pageScale}
+            rhetoricalLabels={rhetoricalLabels}
+          />
+        )}
+      </div>
+    </div>
+  );
+});
 
 const SentenceMarkers = memo(({ block, pageIndex, blockIndex, activatedBlock, sentencePositions, pageScale, onAddMarker, onRemoveMarker }) => {
   console.log('=== SENTENCE MARKERS RENDER ===');
@@ -126,6 +276,431 @@ const SentenceMarkers = memo(({ block, pageIndex, blockIndex, activatedBlock, se
   );
 });
 
+// Add new ChatResponse component for structured visualization
+const ChatResponseDisplay = ({ data }) => {
+  const { relevant_sentences, overall_relevance_score, explanation, answer } = data;
+  
+  // Sort sentences by relevance score (highest first)
+  const sortedSentences = relevant_sentences ? [...relevant_sentences].sort((a, b) => b.relevance_score - a.relevance_score) : [];
+
+  return (
+    <div className="chat-response-structured">
+      <div className="response-section">
+        <strong>Answer:</strong> {answer}
+      </div>
+      
+      {sortedSentences.length > 0 && (
+        <div className="response-section">
+          <strong>Relevant Sentences:</strong>
+          <div className="sentences-list">
+            {sortedSentences.map((sentence, index) => (
+              <div key={index} className="sentence-item">
+                <div className="sentence-header">
+                  <span className="sentence-number">Sentence {sentence.sentence_number}</span>
+                  <span className="relevance-score">{sentence.relevance_score}%</span>
+                </div>
+                <div className="sentence-text">{sentence.text}</div>
+                <div className="relevance-bar">
+                  <div 
+                    className="relevance-fill" 
+                    style={{ width: `${sentence.relevance_score}%` }}
+                  ></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      
+      <div className="response-section">
+        <strong>Overall Relevance:</strong> {overall_relevance_score}%
+        <div className="overall-relevance-bar">
+          <div 
+            className="relevance-fill" 
+            style={{ width: `${overall_relevance_score}%` }}
+          ></div>
+        </div>
+      </div>
+      
+      <div className="response-section">
+        <strong>Explanation:</strong> {explanation}
+      </div>
+    </div>
+  );
+};
+
+// Add new ChatPanel component
+const ChatPanel = ({ documentId }) => {
+  const [messages, setMessages] = useState([]);
+  const [inputMessage, setInputMessage] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [sentenceCount, setSentenceCount] = useState(0);
+
+  // Function to fetch current sentence count
+  const fetchSentenceCount = async () => {
+    if (!documentId) {
+      setSentenceCount(0);
+      return;
+    }
+    
+    try {
+      const response = await fetch(`${API_URL}/sentences/${documentId}`);
+      const data = await response.json();
+      const count = data.sentences ? data.sentences.length : 0;
+      setSentenceCount(count);
+    } catch (error) {
+      console.error('Error fetching sentence count:', error);
+      setSentenceCount(0);
+    }
+  };
+
+  // Fetch sentence count when documentId changes
+  useEffect(() => {
+    fetchSentenceCount();
+  }, [documentId]);
+
+  // Set up polling to update sentence count every 2 seconds
+  useEffect(() => {
+    if (!documentId) return;
+    
+    const interval = setInterval(fetchSentenceCount, 2000);
+    return () => clearInterval(interval);
+  }, [documentId]);
+
+  const handleSendMessage = async () => {
+    if (!inputMessage.trim() || !documentId) return;
+
+    const newMessage = {
+      role: 'user',
+      content: inputMessage
+    };
+
+    setMessages(prev => [...prev, newMessage]);
+    setInputMessage('');
+    setIsLoading(true);
+
+    try {
+      // Fetch current sentences before sending to chat
+      console.log('=== FETCHING SENTENCES FOR CHAT ===');
+      const sentencesResponse = await fetch(`${API_URL}/sentences/${documentId}`);
+      const sentencesData = await sentencesResponse.json();
+      const sentences = sentencesData.sentences || [];
+      
+      console.log('Sentences fetched for chat:', sentences);
+      console.log('Number of sentences:', sentences.length);
+
+      const response = await fetch(`${API_URL}/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: inputMessage,
+          sentences: sentences
+        }),
+      });
+
+      const data = await response.json();
+      
+      if (data.error) {
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: `Error: ${data.error}`,
+          isStructured: false
+        }]);
+      } else {
+        // Handle structured response
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: data,
+          isStructured: true
+        }]);
+      }
+    } catch (error) {
+      console.error('Error sending message:', error);
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: 'Sorry, there was an error processing your message.',
+        isStructured: false
+      }]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="chat-panel">
+      <div className="chat-header">
+        <h3>Chat with Gemini</h3>
+        <small>
+          {sentenceCount > 0 
+            ? `${sentenceCount} sentence${sentenceCount !== 1 ? 's' : ''} available for context`
+            : 'Click blocks to activate them, then mark sentence starters to enable chat'
+          }
+        </small>
+      </div>
+      <div className="chat-messages">
+        {messages.map((message, index) => (
+          <div key={index} className={`chat-message ${message.role}`}>
+            {message.isStructured ? (
+              <ChatResponseDisplay data={message.content} />
+            ) : (
+              <div className="message-content">{message.content}</div>
+            )}
+          </div>
+        ))}
+        {isLoading && (
+          <div className="chat-message assistant">
+            <div className="message-content">Thinking...</div>
+          </div>
+        )}
+      </div>
+      <div className="chat-input">
+        <input
+          type="text"
+          value={inputMessage}
+          onChange={(e) => setInputMessage(e.target.value)}
+          onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+          placeholder="Ask a question about the text..."
+          disabled={!documentId}
+        />
+        <button onClick={handleSendMessage} disabled={isLoading || !documentId}>
+          Send
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// Document Browser Component
+const DocumentBrowser = ({ onSelectDocument, onClose }) => {
+  const [documents, setDocuments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName] = useState('');
+
+  useEffect(() => {
+    fetchDocuments();
+  }, []);
+
+  const fetchDocuments = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch(`${API_URL}/documents`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch documents');
+      }
+      const data = await response.json();
+      setDocuments(data.documents);
+    } catch (error) {
+      console.error('Error fetching documents:', error);
+      setError('Failed to load documents');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteDocument = async (documentId) => {
+    if (!window.confirm('Are you sure you want to delete this document? This action cannot be undone.')) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_URL}/documents/${documentId}`, {
+        method: 'DELETE',
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to delete document');
+      }
+      
+      // Refresh the document list
+      fetchDocuments();
+    } catch (error) {
+      console.error('Error deleting document:', error);
+      alert('Failed to delete document');
+    }
+  };
+
+  const handleRenameDocument = async (documentId, newName) => {
+    try {
+      const response = await fetch(`${API_URL}/documents/${documentId}/rename`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ new_name: newName }),
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to rename document');
+      }
+      
+      setEditingId(null);
+      setEditName('');
+      fetchDocuments();
+    } catch (error) {
+      console.error('Error renaming document:', error);
+      alert('Failed to rename document');
+    }
+  };
+
+  const startEditing = (document) => {
+    setEditingId(document.id);
+    setEditName(document.original_filename);
+  };
+
+  const cancelEditing = () => {
+    setEditingId(null);
+    setEditName('');
+  };
+
+  const formatFileSize = (bytes) => {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  const formatDate = (dateString) => {
+    return new Date(dateString).toLocaleString();
+  };
+
+  if (loading) {
+    return (
+      <div className="document-browser-overlay">
+        <div className="document-browser">
+          <div className="d-flex justify-content-center p-5">
+            <div className="spinner-border" role="status">
+              <span className="visually-hidden">Loading documents...</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="document-browser-overlay">
+      <div className="document-browser">
+        <div className="document-browser-header">
+          <h3>Document Sessions</h3>
+          <button 
+            type="button" 
+            className="btn-close" 
+            onClick={onClose}
+            aria-label="Close"
+          ></button>
+        </div>
+        
+        {error && (
+          <div className="alert alert-danger m-3">{error}</div>
+        )}
+        
+        <div className="document-list">
+          {documents.length === 0 ? (
+            <div className="text-center p-5 text-muted">
+              <p>No documents found. Upload a PDF to get started.</p>
+            </div>
+          ) : (
+            documents.map((document) => (
+              <div key={document.id} className="document-item">
+                <div className="document-info">
+                  {editingId === document.id ? (
+                    <div className="edit-form">
+                      <input
+                        type="text"
+                        value={editName}
+                        onChange={(e) => setEditName(e.target.value)}
+                        className="form-control form-control-sm"
+                        onKeyPress={(e) => {
+                          if (e.key === 'Enter') {
+                            handleRenameDocument(document.id, editName);
+                          }
+                        }}
+                      />
+                      <div className="edit-actions">
+                        <button
+                          className="btn btn-sm btn-success"
+                          onClick={() => handleRenameDocument(document.id, editName)}
+                        >
+                          Save
+                        </button>
+                        <button
+                          className="btn btn-sm btn-secondary"
+                          onClick={cancelEditing}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="document-details">
+                      <h6 className="document-title">{document.original_filename}</h6>
+                      <div className="document-meta">
+                        <span className="meta-item">
+                          <i className="bi bi-file-pdf"></i>
+                          {document.page_count} pages
+                        </span>
+                        <span className="meta-item">
+                          <i className="bi bi-check-circle"></i>
+                          {document.activated_blocks} activated blocks
+                        </span>
+                        <span className="meta-item">
+                          <i className="bi bi-chat-text"></i>
+                          {document.sentence_count} sentences
+                        </span>
+                        <span className="meta-item">
+                          <i className="bi bi-calendar"></i>
+                          {formatDate(document.created_at)}
+                        </span>
+                        {document.file_exists && (
+                          <span className="meta-item">
+                            <i className="bi bi-hdd"></i>
+                            {formatFileSize(document.file_size)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+                
+                <div className="document-actions">
+                  {editingId !== document.id && (
+                    <>
+                      <button
+                        className="btn btn-sm btn-primary"
+                        onClick={() => onSelectDocument(document)}
+                        disabled={!document.file_exists}
+                      >
+                        Open
+                      </button>
+                      <button
+                        className="btn btn-sm btn-outline-secondary"
+                        onClick={() => startEditing(document)}
+                      >
+                        Rename
+                      </button>
+                      <button
+                        className="btn btn-sm btn-outline-danger"
+                        onClick={() => handleDeleteDocument(document.id)}
+                      >
+                        Delete
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 function App() {
   // console.log('=== APP RENDER ===');
   const [numPages, setNumPages] = useState(null)
@@ -145,6 +720,12 @@ function App() {
   const [isReinitializing, setIsReinitializing] = useState(false)
   const [wordPositions, setWordPositions] = useState([])
   const [rhetoricalLabels, setRhetoricalLabels] = useState({})
+  const [showDocumentBrowser, setShowDocumentBrowser] = useState(false)
+  
+  // Performance optimization: Track visible pages for virtualization
+  const [visiblePages, setVisiblePages] = useState(new Set([1]))
+  const containerRef = useRef(null)
+  const pageRefs = useRef({})
 
   // Log all state changes
   useEffect(() => {
@@ -163,10 +744,50 @@ function App() {
     // console.log('sentencePositions:', sentencePositions);
   }, [numPages, pageNumber, file, loading, error, pdfInfo, blocks, showBlocks, pageScale, activatedTexts, isProcessing, sentencePositions]);
 
+  // Intersection Observer for virtualization
+  useEffect(() => {
+    if (!containerRef.current || !numPages) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const newVisiblePages = new Set(visiblePages);
+        
+        entries.forEach((entry) => {
+          const pageNumber = parseInt(entry.target.dataset.pageNumber);
+          if (entry.isIntersecting) {
+            newVisiblePages.add(pageNumber);
+          } else {
+            newVisiblePages.delete(pageNumber);
+          }
+        });
+        
+        setVisiblePages(newVisiblePages);
+      },
+      {
+        root: containerRef.current,
+        rootMargin: '100px', // Load pages 100px before they become visible
+        threshold: 0.1
+      }
+    );
+
+    // Observe all page containers
+    Object.values(pageRefs.current).forEach(ref => {
+      if (ref) observer.observe(ref);
+    });
+
+    return () => observer.disconnect();
+  }, [numPages, visiblePages]);
+
+  // Memoized function to check if a page should be rendered
+  const shouldRenderPage = useCallback((pageNum) => {
+    return visiblePages.has(pageNum);
+  }, [visiblePages]);
+
   function onDocumentLoadSuccess({ numPages }) {
     // console.log('=== DOCUMENT LOADED SUCCESSFULLY ===');
     // console.log('Number of pages:', numPages);
     setNumPages(numPages);
+    setVisiblePages(new Set([1])); // Start with first page visible
   }
 
   function onDocumentLoadError(error) {
@@ -237,14 +858,58 @@ function App() {
     }
   }
 
-  const handleBlockClick = async (pageIndex, blockIndex) => {
+  // Optimized handleBlockClick with reduced API calls
+  const handleBlockClick = useCallback(async (pageIndex, blockIndex) => {
     const block = blocks[pageIndex][blockIndex];
     const isActive = block.user_order !== null;
     console.log('=== HANDLE BLOCK CLICK ===');
     console.log('Initial state:', { pageIndex, blockIndex, isActive, block });
 
     try {
-      // Call the activate-block endpoint
+      // Optimistic update for better UX
+      const optimisticBlocks = [...blocks];
+      const optimisticActivatedTexts = [...activatedTexts];
+      
+      if (isActive) {
+        // Deactivating - remove user_order
+        optimisticBlocks[pageIndex][blockIndex] = {
+          ...optimisticBlocks[pageIndex][blockIndex],
+          user_order: null
+        };
+        
+        // Remove from activated texts
+        const updatedActivatedTexts = optimisticActivatedTexts.filter(
+          item => !(item.pageIndex === pageIndex && item.blockIndex === block.id)
+        );
+        setActivatedTexts(updatedActivatedTexts);
+      } else {
+        // Activating - add user_order
+        const nextOrder = Math.max(0, ...optimisticActivatedTexts.map(item => item.userOrder || 0)) + 1;
+        optimisticBlocks[pageIndex][blockIndex] = {
+          ...optimisticBlocks[pageIndex][blockIndex],
+          user_order: nextOrder
+        };
+        
+        // Add to activated texts
+        const newActivatedBlock = {
+          pageIndex,
+          blockIndex: block.id,
+          page_id: block.page_id,
+          block_id: block.block_id,
+          blockId: `${pageIndex + 1}-${block.id}`,
+          text: block.text,
+          userOrder: nextOrder,
+          word_positions: wordPositions.filter(w => 
+            w.page_id === block.page_id && 
+            w.block_id === block.block_id
+          )
+        };
+        setActivatedTexts(prev => [...prev, newActivatedBlock]);
+      }
+      
+      setBlocks(optimisticBlocks);
+
+      // Single API call to update block activation
       const response = await fetch(`${API_URL}/activate-block`, {
         method: 'POST',
         headers: {
@@ -262,85 +927,84 @@ function App() {
         throw new Error('Failed to update block activation');
       }
 
-      // Update activated texts based on user_order
-      const blocksResponse = await fetch(`${API_URL}/blocks/${pdfInfo.document_id}`);
-      if (!blocksResponse.ok) {
-        throw new Error('Failed to fetch updated blocks');
+      // Only fetch updated data if we need sentence numbers
+      if (!isActive) {
+        // Reset sentence numbers only when activating new blocks
+        const resetResponse = await fetch(`${API_URL}/reset-sentence-numbers`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            document_id: pdfInfo.document_id
+          })
+        });
+
+        if (!resetResponse.ok) {
+          throw new Error('Failed to reset sentence numbers');
+        }
+
+        // Fetch updated blocks and words after resetting sentence numbers
+        const updatedBlocksResponse = await fetch(`${API_URL}/blocks/${pdfInfo.document_id}`);
+        if (!updatedBlocksResponse.ok) {
+          throw new Error('Failed to fetch updated blocks after reset');
+        }
+        const updatedData = await updatedBlocksResponse.json();
+        
+        setBlocks(updatedData.blocks);
+        setWordPositions(updatedData.words);
+
+        // Update activated texts with the latest word positions including sentence numbers
+        const updatedActivatedBlocks = updatedData.blocks.flatMap((pageBlocks, pageIdx) =>
+          pageBlocks
+            .filter(block => block.user_order !== null)
+            .map(block => ({
+              pageIndex: pageIdx,
+              blockIndex: block.id,
+              page_id: block.page_id,
+              block_id: block.block_id,
+              blockId: `${pageIdx + 1}-${block.id}`,
+              text: block.text,
+              userOrder: block.user_order,
+              word_positions: updatedData.words.filter(w => 
+                w.page_id === block.page_id && 
+                w.block_id === block.block_id
+              )
+            }))
+        );
+        setActivatedTexts(updatedActivatedBlocks);
       }
-      const data = await blocksResponse.json();
-      console.log('Blocks response:', data);
-      setBlocks(data.blocks);
-      setWordPositions(data.words);
-
-      // Update activated texts with blocks that have user_order
-      const activatedBlocks = data.blocks.flatMap((pageBlocks, pageIdx) =>
-        pageBlocks
-          .filter(block => block.user_order !== null)
-          .map(block => ({
-            pageIndex: pageIdx,
-            blockIndex: block.id,
-            page_id: block.page_id,
-            block_id: block.block_id,
-            blockId: `${pageIdx + 1}-${block.id}`,
-            text: block.text,
-            word_positions: data.words.filter(w => 
-              w.page_id === block.page_id && 
-              w.block_id === block.block_id
-            )
-          }))
-      );
-      console.log('Activated blocks:', activatedBlocks);
-      setActivatedTexts(activatedBlocks);
-
-      // Reset sentence numbers
-      const resetResponse = await fetch(`${API_URL}/reset-sentence-numbers`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          document_id: pdfInfo.document_id
-        })
-      });
-
-      if (!resetResponse.ok) {
-        throw new Error('Failed to reset sentence numbers');
-      }
-
-      // Fetch updated blocks and words after resetting sentence numbers
-      const updatedBlocksResponse = await fetch(`${API_URL}/blocks/${pdfInfo.document_id}`);
-      if (!updatedBlocksResponse.ok) {
-        throw new Error('Failed to fetch updated blocks after reset');
-      }
-      const updatedData = await updatedBlocksResponse.json();
-      console.log('Updated blocks response:', updatedData);
-      setBlocks(updatedData.blocks);
-      setWordPositions(updatedData.words);
-
-      // Update activated texts with the latest word positions including sentence numbers
-      const updatedActivatedBlocks = updatedData.blocks.flatMap((pageBlocks, pageIdx) =>
-        pageBlocks
-          .filter(block => block.user_order !== null)
-          .map(block => ({
-            pageIndex: pageIdx,
-            blockIndex: block.id,
-            page_id: block.page_id,
-            block_id: block.block_id,
-            blockId: `${pageIdx + 1}-${block.id}`,
-            text: block.text,
-            word_positions: updatedData.words.filter(w => 
-              w.page_id === block.page_id && 
-              w.block_id === block.block_id
-            )
-          }))
-      );
-      console.log('Updated activated blocks:', updatedActivatedBlocks);
-      setActivatedTexts(updatedActivatedBlocks);
 
     } catch (error) {
       console.error('Error handling block click:', error);
+      // Revert optimistic updates on error
+      const blocksResponse = await fetch(`${API_URL}/blocks/${pdfInfo.document_id}`);
+      if (blocksResponse.ok) {
+        const data = await blocksResponse.json();
+        setBlocks(data.blocks);
+        setWordPositions(data.words);
+        
+        const activatedBlocks = data.blocks.flatMap((pageBlocks, pageIdx) =>
+          pageBlocks
+            .filter(block => block.user_order !== null)
+            .map(block => ({
+              pageIndex: pageIdx,
+              blockIndex: block.id,
+              page_id: block.page_id,
+              block_id: block.block_id,
+              blockId: `${pageIdx + 1}-${block.id}`,
+              text: block.text,
+              userOrder: block.user_order,
+              word_positions: data.words.filter(w => 
+                w.page_id === block.page_id && 
+                w.block_id === block.block_id
+              )
+            }))
+        );
+        setActivatedTexts(activatedBlocks);
+      }
     }
-  };
+  }, [blocks, activatedTexts, wordPositions, pdfInfo]);
 
   // Add useEffect to fetch rhetorical labels when document is loaded
   useEffect(() => {
@@ -444,114 +1108,6 @@ function App() {
     } finally {
         setIsProcessing(false);
     }
-  };
-
-  const renderBlocks = (pageBlocks, pageIndex) => {
-    let lastBlockEnd = 0;
-    
-    return (
-      <>
-        {/* Block Overlays */}
-        {pageBlocks.map((block, blockIndex) => {
-          const blockKey = `${pageIndex}-${blockIndex}`;
-          const isActive = block.user_order !== null;
-          const activatedBlock = activatedTexts.find(
-            item => item.pageIndex === pageIndex && item.blockIndex === block.id
-          );
-
-          return (
-            <div
-              key={`block-${blockKey}`}
-              className="block-overlay"
-              style={{
-                position: 'absolute',
-                left: `${(block.bbox.x0 * pageScale) - 2}px`,
-                top: `${(block.bbox.y0 * pageScale) - 2}px`,
-                width: `${(block.bbox.x1 - block.bbox.x0) * pageScale + 4}px`,
-                height: `${(block.bbox.y1 - block.bbox.y0) * pageScale + 4}px`,
-                border: `2px solid ${isActive ? 'green' : 'grey'}`,
-                backgroundColor: isActive ? 'rgba(0, 255, 0, 0.1)' : 'rgba(128, 128, 128, 0.2)',
-                cursor: 'pointer',
-                zIndex: 1001,
-                pointerEvents: 'auto'
-              }}
-              onClick={() => handleBlockClick(pageIndex, blockIndex)}
-            >
-              {isActive && (
-                <div className="block-number" style={{
-                  position: 'absolute',
-                  top: '-20px',
-                  left: '0',
-                  backgroundColor: 'green',
-                  color: 'white',
-                  padding: '2px 6px',
-                  borderRadius: '3px',
-                  fontSize: '12px'
-                }}>
-                  {block.user_order}
-                </div>
-              )}
-              
-              {/* Word bounding boxes and sentence starter icons */}
-              {isActive && activatedBlock && activatedBlock.word_positions && activatedBlock.word_positions.map((word, wordIndex) => {
-                const wordLeft = (word.bbox.x0 - block.bbox.x0) * pageScale;
-                const wordTop = (word.bbox.y0 - block.bbox.y0) * pageScale;
-                const wordWidth = (word.bbox.x1 - word.bbox.x0) * pageScale;
-                const wordHeight = (word.bbox.y1 - word.bbox.y0) * pageScale;
-                
-                return (
-                  <div
-                    key={`word-${wordIndex}`}
-                    className="word-hover-area"
-                    style={{
-                      position: 'absolute',
-                      left: `${wordLeft}px`,
-                      top: `${wordTop}px`,
-                      width: `${wordWidth}px`,
-                      height: `${wordHeight}px`,
-                      cursor: 'pointer'
-                    }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleAddMarker(word, pageIndex, blockIndex);
-                    }}
-                  >
-                    {!word.is_sentence_starter && (
-                      <div 
-                        className="add-marker"
-                        style={{
-                          left: '-13px',
-                          top: '50%',
-                          transform: 'translateY(-50%)'
-                        }}
-                      >
-                        <div className="add-marker-circle">+</div>
-                        <div className="add-marker-triangle" />
-                      </div>
-                    )}
-                    {word.is_sentence_starter && (
-                      <div
-                        className="sentence-marker"
-                        style={{
-                          left: '-13px',
-                          top: '50%',
-                          transform: 'translateY(-50%)'
-                        }}
-                      >
-                        <div className="sentence-marker-circle">
-                          {word.sentence_number || '?'}
-                        </div>
-                        <div className="sentence-marker-triangle" />
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          );
-        })}
-      </>
-    );
   };
 
   const handleAddMarker = useCallback(async (word, pageIndex, blockIndex) => {
@@ -735,96 +1291,53 @@ function App() {
     }
   };
 
-  // Update the renderSentenceMarkers function to use rhetoricalLabels
-  const renderSentenceMarkers = useCallback((block, pageIndex, blockIndex) => {
-    const activatedBlock = activatedTexts.find(
-      item => item.pageIndex === pageIndex && item.blockIndex === block.id
-    );
-    
-    if (!activatedBlock?.word_positions) {
-      return null;
+  const handleSelectDocument = async (document) => {
+    try {
+      setLoading(true);
+      setError(null);
+      
+      // Fetch the PDF file
+      const pdfResponse = await fetch(`${API_URL}/pdf/${document.filename}`);
+      if (!pdfResponse.ok) {
+        throw new Error('Failed to fetch PDF file');
+      }
+      
+      const pdfBlob = await pdfResponse.blob();
+      const pdfFile = new File([pdfBlob], document.original_filename, { type: 'application/pdf' });
+      
+      // Set the file and document info
+      setFile(pdfFile);
+      setPdfInfo({
+        document_id: document.id,
+        filename: document.filename,
+        original_filename: document.original_filename
+      });
+      
+      // Get blocks and word positions
+      const blocksResponse = await fetch(`${API_URL}/blocks/${document.id}`);
+      if (!blocksResponse.ok) {
+        throw new Error('Failed to fetch blocks and words');
+      }
+      const data = await blocksResponse.json();
+      setBlocks(data.blocks);
+      setWordPositions(data.words);
+      setShowBlocks(true);
+      
+      // Reset other state
+      setPageNumber(1);
+      setActivatedTexts([]);
+      setRhetoricalLabels({});
+      
+      // Close the document browser
+      setShowDocumentBrowser(false);
+      
+    } catch (error) {
+      console.error('Error loading document:', error);
+      setError('Error loading document: ' + error.message);
+    } finally {
+      setLoading(false);
     }
-
-    console.log('=== RENDERING SENTENCE MARKERS ===');
-    console.log('Current rhetorical labels:', rhetoricalLabels);
-    console.log('Number of labels:', Object.keys(rhetoricalLabels).length);
-
-    return (
-      <div
-        key={`sentence-markers-${pageIndex}-${blockIndex}`}
-        className="sentence-markers"
-        style={{
-          position: 'absolute',
-          left: 0,
-          top: 0,
-          width: '100%',
-          height: '100%',
-          zIndex: 1003,
-          pointerEvents: 'none',
-          transform: `scale(${pageScale})`,
-          transformOrigin: 'top left'
-        }}
-      >
-        {activatedBlock.word_positions
-          .filter(word => word.is_sentence_starter)
-          .map((word) => {
-            const label = rhetoricalLabels[word.sentence_number];
-            console.log(`Rendering marker for sentence ${word.sentence_number}:`, label);
-            return (
-              <div
-                key={`sentence-${word.sentence_number}`}
-                className="sentence-marker"
-                style={{
-                  left: `${word.bbox.x0}px`,
-                  top: `${(word.bbox.y0 + word.bbox.y1) / 2 - 8}px`,
-                  transform: 'translateX(-13px)'
-                }}
-              >
-                <div className="sentence-marker-circle">
-                  {word.sentence_number || '?'}
-                </div>
-                <div className="sentence-marker-triangle" />
-                {label && (
-                  <div className="rhetorical-label" style={{
-                    position: 'absolute',
-                    left: '20px',
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    backgroundColor: 'rgba(255, 255, 255, 0.9)',
-                    padding: '8px 12px',
-                    borderRadius: '4px',
-                    fontSize: '12px',
-                    whiteSpace: 'nowrap',
-                    zIndex: 1004,
-                    boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-                    maxWidth: '300px',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis'
-                  }}>
-                    <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
-                      {label.function} ({label.relevance}%)
-                    </div>
-                    <div style={{ 
-                      fontSize: '11px', 
-                      color: '#666',
-                      whiteSpace: 'normal',
-                      maxHeight: '60px',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      display: '-webkit-box',
-                      WebkitLineClamp: 3,
-                      WebkitBoxOrient: 'vertical'
-                    }}>
-                      {label.text}
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-      </div>
-    );
-  }, [activatedTexts, pageScale, rhetoricalLabels]);
+  };
 
   return (
     <div id="root" style={{ width: '100vw', height: '100vh', overflow: 'hidden' }}>
@@ -839,6 +1352,13 @@ function App() {
               disabled={loading}
               style={{ width: 'auto' }}
             />
+            <button 
+              onClick={() => setShowDocumentBrowser(true)}
+              className="btn btn-outline-primary"
+              disabled={loading}
+            >
+              Open Session
+            </button>
             {file && (
               <button 
                 onClick={handleGeminiProcess}
@@ -860,6 +1380,11 @@ function App() {
           {error && (
             <div className="alert alert-danger mb-0 py-1">{error}</div>
           )}
+          {numPages && (
+            <div className="d-flex align-items-center text-muted small">
+              <span>Pages: {visiblePages.size}/{numPages} visible</span>
+            </div>
+          )}
           <button 
             onClick={handleReinitializeDatabase}
             disabled={isReinitializing}
@@ -877,10 +1402,17 @@ function App() {
           </button>
         </div>
 
+        {showDocumentBrowser && (
+          <DocumentBrowser 
+            onSelectDocument={handleSelectDocument}
+            onClose={() => setShowDocumentBrowser(false)}
+          />
+        )}
+
         {file && !loading && !error && (
-          <div className="d-flex flex-grow-1" style={{ width: '100%', height: 'calc(100% - 60px)', overflow: 'hidden' }}>
+          <div className="main-content">
             {/* Left side - PDF Viewer */}
-            <div className="pdf-container" style={{ width: '50%', height: '100%', overflowY: 'auto', borderRight: '1px solid #ccc' }}>
+            <div className="pdf-container" ref={containerRef}>
               <Document 
                 file={file}
                 onLoadSuccess={onDocumentLoadSuccess}
@@ -896,60 +1428,74 @@ function App() {
                   width: '100%',
                   height: '100%'
                 }}>
-                  {Array.from(new Array(numPages), (el, index) => (
-                    <div key={`page_${index + 1}`} className="page-container position-relative" style={{
-                      width: '100%',
-                      height: 'auto',
-                      display: 'flex',
-                      justifyContent: 'center',
-                      marginBottom: '0'
-                    }}>
-                      <Page 
-                        pageNumber={index + 1} 
-                        scale={pageScale}
-                        onLoadSuccess={(page) => onPageLoadSuccess(page, index)}
-                        onLoadError={onPageLoadError}
-                        loading={<div className="d-flex justify-content-center p-3"><div className="spinner-border spinner-border-sm" role="status"><span className="visually-hidden">Loading page {index + 1}...</span></div></div>}
-                        error={<div className="alert alert-danger m-3">Error loading page {index + 1}!</div>}
-                        className="pdf-page"
+                  {Array.from(new Array(numPages), (el, index) => {
+                    const pageNum = index + 1;
+                    const isVisible = shouldRenderPage(pageNum);
+                    
+                    return (
+                      <div 
+                        key={`page_${pageNum}`} 
+                        ref={(ref) => {
+                          pageRefs.current[pageNum] = ref;
+                        }}
+                        data-page-number={pageNum}
                         style={{
-                          maxWidth: '100%',
-                          height: 'auto'
+                          width: '100%',
+                          height: 'auto',
+                          display: 'flex',
+                          justifyContent: 'center',
+                          marginBottom: '0',
+                          minHeight: isVisible ? 'auto' : '800px' // Placeholder height for non-visible pages
                         }}
-                        onRenderSuccess={(page) => {
-                          const viewport = page.getViewport({ scale: 1 })
-                          setPageScale(viewport.width / page.originalWidth)
-                        }}
-                      />
-                      {blocks && blocks[index] && renderBlocks(blocks[index], index)}
-                    </div>
-                  ))}
+                      >
+                        {isVisible ? (
+                          <MemoizedPage 
+                            pageNumber={pageNum}
+                            scale={pageScale}
+                            onLoadSuccess={(page) => onPageLoadSuccess(page, index)}
+                            onLoadError={onPageLoadError}
+                            onRenderSuccess={(page) => {
+                              // Use the page's viewport to get the actual rendered dimensions
+                              const viewport = page.getViewport({ scale: 1 });
+                              const pageElement = page.canvas.parentElement;
+                              const actualWidth = pageElement.offsetWidth;
+                              setPageScale(actualWidth / viewport.width);
+                            }}
+                            blocks={blocks}
+                            pageIndex={index}
+                            onBlockClick={handleBlockClick}
+                            activatedTexts={activatedTexts}
+                            pageScale={pageScale}
+                            rhetoricalLabels={rhetoricalLabels}
+                          />
+                        ) : (
+                          <div 
+                            style={{
+                              width: '100%',
+                              height: '800px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              backgroundColor: '#f8f9fa',
+                              border: '1px solid #dee2e6',
+                              borderRadius: '4px'
+                            }}
+                          >
+                            <div className="text-muted">
+                              Page {pageNum} - Scroll to load
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </Document>
             </div>
 
-            {/* Right side - Rhetorical Labels */}
-            <div className="rhetorical-labels" style={{ width: '50%', height: '100%', overflowY: 'auto', padding: '20px' }}>
-              <h3 className="mb-4">Rhetorical Labels</h3>
-              {Object.keys(rhetoricalLabels).length > 0 ? (
-                <div className="d-flex flex-column gap-4">
-                  {Object.entries(rhetoricalLabels)
-                    .sort(([a], [b]) => parseInt(a) - parseInt(b))
-                    .map(([sentenceNumber, label]) => (
-                      <div key={sentenceNumber} className="card">
-                        <div className="card-body">
-                          <h5 className="card-title">Sentence {sentenceNumber}</h5>
-                          <h6 className="card-subtitle mb-2 text-muted">
-                            {label.function} ({label.relevance}%)
-                          </h6>
-                          <p className="card-text">{label.text}</p>
-                        </div>
-                      </div>
-                    ))}
-                </div>
-              ) : (
-                <p>No rhetorical labels available. Process the text with Gemini to generate labels.</p>
-              )}
+            {/* Right side - Chat Panel */}
+            <div className="right-panel">
+              <ChatPanel documentId={pdfInfo?.document_id} />
             </div>
           </div>
         )}
