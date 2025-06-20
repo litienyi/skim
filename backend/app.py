@@ -7,6 +7,8 @@ import io
 import json
 import google.generativeai as genai
 from dotenv import load_dotenv
+from pydantic import BaseModel
+from typing import List
 from database import (
     init_db, get_document_id, save_page, save_block, save_sentence,
     get_document_blocks, get_document_sentences, save_words, get_block_words,
@@ -24,6 +26,18 @@ load_dotenv()
 # Configure Gemini
 genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
 model = genai.GenerativeModel('models/gemini-2.0-flash')
+
+# Pydantic schema for structured chat responses
+class RelevantSentence(BaseModel):
+    sentence_number: int
+    text: str
+    relevance_score: float  # 0-100
+
+class ChatResponse(BaseModel):
+    relevant_sentences: List[RelevantSentence]
+    overall_relevance_score: float  # 0-100
+    explanation: str
+    answer: str
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -49,7 +63,7 @@ def home():
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', 'http://localhost:5173')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
     response.headers.add('Access-Control-Allow-Credentials', 'true')
     return response
 
@@ -225,6 +239,15 @@ def get_blocks(document_id):
         conn = get_db_connection()
         cursor = conn.cursor()
 
+        # First get the total number of pages for this document
+        cursor.execute('''
+            SELECT MAX(page_number) as max_page
+            FROM pages
+            WHERE document_id = ?
+        ''', (document_id,))
+        result = cursor.fetchone()
+        total_pages = result['max_page'] if result and result['max_page'] else 0
+
         # Get blocks with user_order
         cursor.execute('''
             SELECT b.id, b.page_id, b.block_number, b.text, b.x0, b.y0, b.x1, b.y1, b.user_order, p.page_number
@@ -251,14 +274,13 @@ def get_blocks(document_id):
         current_page = None
         page_blocks = []
 
+        # Initialize array with empty arrays for all pages
+        transformed_blocks = [[] for _ in range(total_pages)]
+
+        # Fill in the blocks for pages that have them
         for block in blocks:
-            if current_page != block['page_number']:
-                if page_blocks:
-                    transformed_blocks.append(page_blocks)
-                page_blocks = []
-                current_page = block['page_number']
-            
-            page_blocks.append({
+            page_index = block['page_number'] - 1  # Convert to 0-based index
+            transformed_blocks[page_index].append({
                 'id': block['block_number'],
                 'page_id': block['page_id'],
                 'block_id': block['id'],
@@ -271,9 +293,6 @@ def get_blocks(document_id):
                 },
                 'user_order': block['user_order']
             })
-        
-        if page_blocks:
-            transformed_blocks.append(page_blocks)
 
         # Transform words data
         transformed_words = [{
@@ -1007,6 +1026,263 @@ def toggle_sentence_starter():
         logger.error(f"Error toggling sentence starter: {str(e)}")
         logger.error("Error traceback:", exc_info=True)
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    try:
+        data = request.get_json()
+        message = data.get('message')
+        sentences = data.get('sentences', [])
+        
+        if not message:
+            return jsonify({'error': 'No message provided'}), 400
+        
+        if not sentences:
+            return jsonify({'error': 'No sentences provided'}), 400
+        
+        # Create context from sentences
+        context = "\n".join([f"Sentence {s['sentence_number']}: {s['text']}" for s in sentences])
+        
+        # Create prompt
+        prompt = f"""You are an AI assistant helping analyze a document. You have access to the following sentences from the document:
+
+{context}
+
+User question: {message}
+
+Please provide a structured response with:
+1. A direct answer to the user's question
+2. The most relevant sentences that support your answer (with relevance scores 0-100)
+3. An overall relevance score for your response (0-100)
+4. A brief explanation of your reasoning
+
+Format your response as JSON with the following structure:
+{{
+    "answer": "Your direct answer here",
+    "relevant_sentences": [
+        {{
+            "sentence_number": 1,
+            "text": "sentence text",
+            "relevance_score": 85.5
+        }}
+    ],
+    "overall_relevance_score": 78.2,
+    "explanation": "Brief explanation of your reasoning"
+}}"""
+
+        # Generate response with retry logic
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = model.generate_content(prompt)
+                response_text = response.text.strip()
+                
+                # Try to parse JSON response
+                try:
+                    # Extract JSON from response if it's wrapped in markdown
+                    if response_text.startswith('```json'):
+                        response_text = response_text.split('```json')[1].split('```')[0].strip()
+                    elif response_text.startswith('```'):
+                        response_text = response_text.split('```')[1].strip()
+                    
+                    parsed_response = json.loads(response_text)
+                    
+                    # Validate response structure
+                    if not all(key in parsed_response for key in ['answer', 'relevant_sentences', 'overall_relevance_score', 'explanation']):
+                        raise ValueError("Missing required fields in response")
+                    
+                    return jsonify(parsed_response)
+                    
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.warning(f"Failed to parse JSON response (attempt {attempt + 1}): {e}")
+                    logger.warning(f"Response text: {response_text}")
+                    
+                    if attempt == max_retries - 1:
+                        # On final attempt, return a fallback response
+                        return jsonify({
+                            "answer": "I apologize, but I'm having trouble processing the document content. Please try rephrasing your question.",
+                            "relevant_sentences": [],
+                            "overall_relevance_score": 0,
+                            "explanation": "Unable to parse AI response properly."
+                        })
+                    continue
+                    
+            except ResourceExhausted:
+                if attempt == max_retries - 1:
+                    return jsonify({'error': 'Service temporarily unavailable. Please try again later.'}), 503
+                time.sleep(2 ** attempt)  # Exponential backoff
+            except Exception as e:
+                logger.error(f"Error generating response (attempt {attempt + 1}): {e}")
+                if attempt == max_retries - 1:
+                    return jsonify({'error': 'Failed to generate response'}), 500
+                time.sleep(1)
+        
+    except Exception as e:
+        logger.error(f"Error in chat endpoint: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/api/documents', methods=['GET'])
+def list_documents():
+    """List all uploaded documents with their metadata."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT 
+                id,
+                filename,
+                original_filename,
+                created_at,
+                (SELECT COUNT(*) FROM pages WHERE document_id = documents.id) as page_count,
+                (SELECT COUNT(*) FROM blocks WHERE document_id = documents.id AND user_order IS NOT NULL) as activated_blocks,
+                (SELECT COUNT(*) FROM sentences WHERE document_id = documents.id) as sentence_count
+            FROM documents 
+            ORDER BY created_at DESC
+        ''')
+        
+        documents = []
+        for row in cursor.fetchall():
+            # Check if file exists
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], row['filename'])
+            file_exists = os.path.exists(file_path)
+            
+            documents.append({
+                'id': row['id'],
+                'filename': row['filename'],
+                'original_filename': row['original_filename'],
+                'created_at': row['created_at'],
+                'page_count': row['page_count'],
+                'activated_blocks': row['activated_blocks'],
+                'sentence_count': row['sentence_count'],
+                'file_exists': file_exists,
+                'file_size': os.path.getsize(file_path) if file_exists else 0
+            })
+        
+        conn.close()
+        return jsonify({'documents': documents})
+        
+    except Exception as e:
+        logger.error(f"Error listing documents: {e}")
+        return jsonify({'error': 'Failed to list documents'}), 500
+
+@app.route('/api/documents/<int:document_id>', methods=['GET'])
+def get_document(document_id):
+    """Get detailed information about a specific document."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT 
+                id,
+                filename,
+                original_filename,
+                created_at
+            FROM documents 
+            WHERE id = ?
+        ''', (document_id,))
+        
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Document not found'}), 404
+        
+        # Get additional stats
+        cursor.execute('SELECT COUNT(*) as count FROM pages WHERE document_id = ?', (document_id,))
+        page_count = cursor.fetchone()['count']
+        
+        cursor.execute('SELECT COUNT(*) as count FROM blocks WHERE document_id = ? AND user_order IS NOT NULL', (document_id,))
+        activated_blocks = cursor.fetchone()['count']
+        
+        cursor.execute('SELECT COUNT(*) as count FROM sentences WHERE document_id = ?', (document_id,))
+        sentence_count = cursor.fetchone()['count']
+        
+        # Check if file exists
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], row['filename'])
+        file_exists = os.path.exists(file_path)
+        
+        document_info = {
+            'id': row['id'],
+            'filename': row['filename'],
+            'original_filename': row['original_filename'],
+            'created_at': row['created_at'],
+            'page_count': page_count,
+            'activated_blocks': activated_blocks,
+            'sentence_count': sentence_count,
+            'file_exists': file_exists,
+            'file_size': os.path.getsize(file_path) if file_exists else 0
+        }
+        
+        conn.close()
+        return jsonify(document_info)
+        
+    except Exception as e:
+        logger.error(f"Error getting document: {e}")
+        return jsonify({'error': 'Failed to get document'}), 500
+
+@app.route('/api/documents/<int:document_id>', methods=['DELETE'])
+def delete_document(document_id):
+    """Delete a document and all its associated data."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Get document filename
+        cursor.execute('SELECT filename FROM documents WHERE id = ?', (document_id,))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Document not found'}), 404
+        
+        filename = row['filename']
+        
+        # Delete from database (cascade will handle related records)
+        cursor.execute('DELETE FROM documents WHERE id = ?', (document_id,))
+        
+        # Delete file from filesystem
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'message': 'Document deleted successfully'})
+        
+    except Exception as e:
+        logger.error(f"Error deleting document: {e}")
+        return jsonify({'error': 'Failed to delete document'}), 500
+
+@app.route('/api/documents/<int:document_id>/rename', methods=['PUT'])
+def rename_document(document_id):
+    """Rename a document's display name."""
+    try:
+        data = request.get_json()
+        new_name = data.get('new_name')
+        
+        if not new_name or not new_name.strip():
+            return jsonify({'error': 'New name is required'}), 400
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Update the original_filename (display name)
+        cursor.execute('''
+            UPDATE documents 
+            SET original_filename = ? 
+            WHERE id = ?
+        ''', (new_name.strip(), document_id))
+        
+        if cursor.rowcount == 0:
+            return jsonify({'error': 'Document not found'}), 404
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'message': 'Document renamed successfully'})
+        
+    except Exception as e:
+        logger.error(f"Error renaming document: {e}")
+        return jsonify({'error': 'Failed to rename document'}), 500
 
 if __name__ == '__main__':
     logger.info("Starting Flask server...")

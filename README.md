@@ -165,6 +165,10 @@ skim2/
 4. Push to the branch
 5. Create a Pull Request
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a detailed history of changes.
+
 ## Acknowledgements
 
 This project relies on several open-source packages and tools:

@@ -12,6 +12,7 @@
   "dependencies": {
     "bootstrap": "^5.3.6",
     "canvas": "^3.1.0",
+    "lodash": "^4.17.21",
     "pdfjs-dist": "4.8.69",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
