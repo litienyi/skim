@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.0.2] - 2024-12-19
+### Fixed
+- Fixed addsentence handler not working due to missing word click handler connection
+- Resolved "Cannot read properties of undefined (reading 'parentElement')" error in PDF rendering
+- Connected handleAddMarker function to word click events in BlockOverlay component
+
+### Implementation Details
+1. **Fixed missing word click handler**: The word click handler in BlockOverlay component was empty. Added proper call to `onAddMarker(word, pageNumber - 1, blockIndex)` when words are clicked.
+
+2. **Added onAddMarker prop propagation**: Updated BlockOverlay and MemoizedPage components to accept and pass through the onAddMarker prop to enable word click functionality.
+
+3. **Fixed parentElement error**: Added null check for `page.canvas` before accessing its parentElement in onRenderSuccess callback to prevent undefined property access errors.
+
+4. **Component prop chain**: Ensured handleAddMarker function is properly connected through the component hierarchy:
+   ```
+   App → MemoizedPage → BlockOverlay → Word Click Handler
+   ```
+
+### Technical Changes
+- Modified `BlockOverlay` component to accept `onAddMarker` prop
+- Updated `MemoizedPage` component to pass `onAddMarker` prop to `BlockOverlay`
+- Added null safety check in `onRenderSuccess` callback
+- Connected `handleAddMarker` function to word click events
+
+### User Impact
+- Users can now click on words in activated blocks to add/remove sentence starter markers
+- Eliminated console errors related to undefined parentElement access
+- Improved reliability of PDF rendering and interaction
+
+---
+
 ## Performance Optimizations for Large PDFs (Unreleased)
 
 ### Problem Analysis

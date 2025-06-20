@@ -15,7 +15,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = '/node_modules/pdfjs-dist/build/pdf.worker
 const API_URL = 'http://localhost:5001/api'
 
 // Memoized BlockOverlay component to prevent unnecessary re-renders
-const BlockOverlay = memo(({ blocks, scale, pageNumber, onBlockClick, activatedTexts, pageScale, rhetoricalLabels }) => {
+const BlockOverlay = memo(({ blocks, scale, pageNumber, onBlockClick, activatedTexts, pageScale, rhetoricalLabels, onAddMarker }) => {
   if (!blocks || !blocks[pageNumber - 1]) return null;
 
   return (
@@ -92,6 +92,9 @@ const BlockOverlay = memo(({ blocks, scale, pageNumber, onBlockClick, activatedT
                   onClick={(e) => {
                     e.stopPropagation();
                     // Handle word click for adding markers
+                    if (onAddMarker) {
+                      onAddMarker(word, pageNumber - 1, blockIndex);
+                    }
                   }}
                 >
                   {!word.is_sentence_starter && (
@@ -168,7 +171,7 @@ const BlockOverlay = memo(({ blocks, scale, pageNumber, onBlockClick, activatedT
 });
 
 // Memoized Page component to prevent unnecessary re-renders
-const MemoizedPage = memo(({ pageNumber, scale, onLoadSuccess, onLoadError, onRenderSuccess, blocks, pageIndex, onBlockClick, activatedTexts, pageScale, rhetoricalLabels }) => {
+const MemoizedPage = memo(({ pageNumber, scale, onLoadSuccess, onLoadError, onRenderSuccess, blocks, pageIndex, onBlockClick, activatedTexts, pageScale, rhetoricalLabels, onAddMarker }) => {
   return (
     <div className="page-container position-relative" style={{
       width: '100%',
@@ -201,6 +204,7 @@ const MemoizedPage = memo(({ pageNumber, scale, onLoadSuccess, onLoadError, onRe
             activatedTexts={activatedTexts}
             pageScale={pageScale}
             rhetoricalLabels={rhetoricalLabels}
+            onAddMarker={onAddMarker}
           />
         )}
       </div>
@@ -1457,9 +1461,11 @@ function App() {
                             onRenderSuccess={(page) => {
                               // Use the page's viewport to get the actual rendered dimensions
                               const viewport = page.getViewport({ scale: 1 });
-                              const pageElement = page.canvas.parentElement;
-                              const actualWidth = pageElement.offsetWidth;
-                              setPageScale(actualWidth / viewport.width);
+                              if (page.canvas && page.canvas.parentElement) {
+                                const pageElement = page.canvas.parentElement;
+                                const actualWidth = pageElement.offsetWidth;
+                                setPageScale(actualWidth / viewport.width);
+                              }
                             }}
                             blocks={blocks}
                             pageIndex={index}
@@ -1467,6 +1473,7 @@ function App() {
                             activatedTexts={activatedTexts}
                             pageScale={pageScale}
                             rhetoricalLabels={rhetoricalLabels}
+                            onAddMarker={handleAddMarker}
                           />
                         ) : (
                           <div 
