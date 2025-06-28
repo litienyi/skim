@@ -1,5 +1,51 @@
 # Changelog
 
+## [1.0.3] - 2024-12-19
+### Changed
+- **Replaced Gemini chatbox with Markdown Visualization**: The right panel now displays a clean markdown representation of activated PDF content instead of the interactive chat interface
+- **Simplified content display**: Removed titles, metadata, and formatting labels to show only the actual text content
+- **Bullet point formatting**: Each sentence is now displayed as a bullet point for better readability
+
+### Fixed
+- **Sentence cleanup on block deactivation**: Fixed issue where sentences from deactivated blocks remained in the database and continued to appear in the markdown visualization
+- **Added automatic sentence sync**: When blocks are deactivated, the `sync_sentences()` function is now called to properly clean up the sentences table
+
+### Added
+- **React Markdown integration**: Added `react-markdown` library for proper markdown rendering
+- **Real-time content updates**: Markdown content refreshes automatically every 5 seconds
+- **Manual refresh button**: Users can manually refresh the markdown content
+- **Loading states**: Visual feedback while generating markdown content
+- **Professional markdown styling**: Clean, readable formatting with proper typography
+
+### Removed
+- **Gemini chat functionality**: Removed interactive chat interface and related components
+- **Chat-related CSS**: Replaced with markdown-specific styling
+- **"Process with Gemini" button**: No longer needed with the new visualization approach
+- **ChatResponseDisplay component**: Replaced with simpler markdown rendering
+
+### Technical Changes
+- **Frontend**: 
+  - Replaced `ChatPanel` with `MarkdownVisualization` component
+  - Added `react-markdown` dependency
+  - Updated CSS for markdown panel styling
+  - Removed unused chat-related state and functions
+- **Backend**: 
+  - Added `sync_sentences()` call in block deactivation process
+  - Ensures proper cleanup of sentences table when blocks are deactivated
+
+### User Impact
+- **Cleaner interface**: Right panel now shows a simple, readable markdown view of PDF content
+- **Immediate updates**: Content updates immediately when blocks are activated/deactivated
+- **Better organization**: Bullet points make it easy to scan through content
+- **Future-ready**: Foundation laid for adding heading functionality (#, ##, ###) to organize content
+
+### Future Enhancements
+- **Heading functionality**: Users will be able to add headings (#, ##, ###) to organize their markdown content
+- **Content editing**: Direct editing of markdown content in the visualization panel
+- **Export functionality**: Export markdown content to files
+
+---
+
 ## [1.0.2] - 2024-12-19
 ### Fixed
 - Fixed addsentence handler not working due to missing word click handler connection

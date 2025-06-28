@@ -869,6 +869,11 @@ def activate_block():
                 ''', (document_id, deactivated_order))
 
         conn.commit()
+        
+        # Sync sentences table to remove sentences from deactivated blocks
+        if not is_activating:
+            sync_sentences(document_id)
+        
         return jsonify({'success': True})
 
     except Exception as e:
