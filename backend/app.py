@@ -23,8 +23,19 @@ from datetime import datetime
 # Load environment variables
 load_dotenv()
 
+# Configure logging first
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
 # Configure Gemini
-genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
+api_key = os.getenv('GOOGLE_API_KEY')
+if not api_key:
+    logger.error("GOOGLE_API_KEY not found in environment variables. Please set it in a .env file.")
+    logger.error("Chat functionality will not work without a valid API key.")
+else:
+    logger.info("Gemini API key found and configured.")
+    
+genai.configure(api_key=api_key)
 model = genai.GenerativeModel('models/gemini-2.0-flash')
 
 # Pydantic schema for structured chat responses
@@ -38,10 +49,6 @@ class ChatResponse(BaseModel):
     overall_relevance_score: float  # 0-100
     explanation: str
     answer: str
-
-# Configure logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -386,6 +393,11 @@ def get_sentences(document_id):
 @app.route('/api/process-text', methods=['POST'])
 def process_text():
     try:
+        # Check if API key is configured
+        if not os.getenv('GOOGLE_API_KEY'):
+            logger.error("Process-text endpoint called but GOOGLE_API_KEY is not configured")
+            return jsonify({'error': 'Gemini processing is not configured. Please set up the API key.'}), 503
+        
         logger.debug("=== PROCESS TEXT REQUEST ===")
         logger.debug(f"Request method: {request.method}")
         logger.debug(f"Request headers: {dict(request.headers)}")
@@ -1030,18 +1042,35 @@ def toggle_sentence_starter():
 @app.route('/api/chat', methods=['POST'])
 def chat():
     try:
+        # Check if API key is configured
+        if not os.getenv('GOOGLE_API_KEY'):
+            logger.error("Chat endpoint called but GOOGLE_API_KEY is not configured")
+            return jsonify({'error': 'Chat functionality is not configured. Please set up the API key.'}), 503
+        
+        logger.debug("=== CHAT REQUEST ===")
+        logger.debug(f"Request method: {request.method}")
+        logger.debug(f"Request headers: {dict(request.headers)}")
+        
         data = request.get_json()
+        logger.debug(f"Request data: {json.dumps(data, indent=2)}")
+        
         message = data.get('message')
         sentences = data.get('sentences', [])
         
+        logger.debug(f"Message: {message}")
+        logger.debug(f"Number of sentences: {len(sentences)}")
+        
         if not message:
+            logger.error("No message provided")
             return jsonify({'error': 'No message provided'}), 400
         
         if not sentences:
+            logger.error("No sentences provided")
             return jsonify({'error': 'No sentences provided'}), 400
         
         # Create context from sentences
         context = "\n".join([f"Sentence {s['sentence_number']}: {s['text']}" for s in sentences])
+        logger.debug(f"Context length: {len(context)} characters")
         
         # Create prompt
         prompt = f"""You are an AI assistant helping analyze a document. You have access to the following sentences from the document:
@@ -1070,27 +1099,51 @@ Format your response as JSON with the following structure:
     "explanation": "Brief explanation of your reasoning"
 }}"""
 
+        logger.debug("=== GEMINI REQUEST ===")
+        logger.debug(f"Prompt length: {len(prompt)} characters")
+        logger.debug("Prompt preview (first 500 chars):")
+        logger.debug(prompt[:500])
+
         # Generate response with retry logic
         max_retries = 3
         for attempt in range(max_retries):
             try:
+                logger.debug(f"Attempt {attempt + 1} of {max_retries}")
                 response = model.generate_content(prompt)
                 response_text = response.text.strip()
+                
+                logger.debug("=== GEMINI RESPONSE ===")
+                logger.debug(f"Response length: {len(response_text)} characters")
+                logger.debug("Raw response:")
+                logger.debug(response_text)
                 
                 # Try to parse JSON response
                 try:
                     # Extract JSON from response if it's wrapped in markdown
                     if response_text.startswith('```json'):
                         response_text = response_text.split('```json')[1].split('```')[0].strip()
+                        logger.debug("Extracted JSON from ```json``` block")
                     elif response_text.startswith('```'):
                         response_text = response_text.split('```')[1].strip()
+                        logger.debug("Extracted JSON from ``` block")
+                    
+                    logger.debug("Cleaned response text:")
+                    logger.debug(response_text)
                     
                     parsed_response = json.loads(response_text)
+                    logger.debug("Successfully parsed JSON response")
+                    logger.debug(f"Parsed response keys: {list(parsed_response.keys())}")
                     
                     # Validate response structure
-                    if not all(key in parsed_response for key in ['answer', 'relevant_sentences', 'overall_relevance_score', 'explanation']):
-                        raise ValueError("Missing required fields in response")
+                    required_keys = ['answer', 'relevant_sentences', 'overall_relevance_score', 'explanation']
+                    missing_keys = [key for key in required_keys if key not in parsed_response]
                     
+                    if missing_keys:
+                        logger.error(f"Missing required fields in response: {missing_keys}")
+                        raise ValueError(f"Missing required fields in response: {missing_keys}")
+                    
+                    logger.debug("Response validation passed")
+                    logger.debug("=== CHAT RESPONSE SUCCESS ===")
                     return jsonify(parsed_response)
                     
                 except (json.JSONDecodeError, ValueError) as e:
@@ -1099,6 +1152,7 @@ Format your response as JSON with the following structure:
                     
                     if attempt == max_retries - 1:
                         # On final attempt, return a fallback response
+                        logger.error("All retry attempts failed, returning fallback response")
                         return jsonify({
                             "answer": "I apologize, but I'm having trouble processing the document content. Please try rephrasing your question.",
                             "relevant_sentences": [],
@@ -1107,18 +1161,29 @@ Format your response as JSON with the following structure:
                         })
                     continue
                     
-            except ResourceExhausted:
+            except ResourceExhausted as e:
+                logger.warning(f"Resource exhausted (attempt {attempt + 1}): {e}")
                 if attempt == max_retries - 1:
+                    logger.error("All retry attempts failed due to resource exhaustion")
                     return jsonify({'error': 'Service temporarily unavailable. Please try again later.'}), 503
                 time.sleep(2 ** attempt)  # Exponential backoff
             except Exception as e:
                 logger.error(f"Error generating response (attempt {attempt + 1}): {e}")
+                logger.error(f"Error type: {type(e)}")
+                logger.error("Error traceback:", exc_info=True)
                 if attempt == max_retries - 1:
+                    logger.error("All retry attempts failed")
                     return jsonify({'error': 'Failed to generate response'}), 500
                 time.sleep(1)
         
+        # If we get here, all retries were exhausted
+        logger.error("All retry attempts exhausted without success")
+        return jsonify({'error': 'Failed to generate response after all retries'}), 500
+        
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}")
+        logger.error(f"Error type: {type(e)}")
+        logger.error("Error traceback:", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/api/documents', methods=['GET'])
