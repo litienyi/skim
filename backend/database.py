@@ -557,7 +557,9 @@ def sync_sentences(document_id):
         
         logger.debug("=== PROCESSING WORDS ===")
         for i, row in enumerate(rows):
-            logger.debug(f"Processing word: '{row['word_text']}' (Block {row['block_id']}, Order {row['user_order']}, Starter: {row['is_sentence_starter']})")
+            # Only log every 500th word to reduce verbosity even more
+            if i % 500 == 0:
+                logger.debug(f"Processing word {i}: '{row['word_text']}' (Block {row['block_id']}, Order {row['user_order']}, Starter: {row['is_sentence_starter']})")
             
             # If this is a sentence starter and we have a current sentence, save it
             if row['is_sentence_starter'] and current_sentence:
@@ -642,23 +644,15 @@ def sync_sentences(document_id):
         conn.commit()
         logger.debug(f"Successfully synced {current_sentence_number - 1} sentences for document {document_id}")
         
-        # Verify the results
+        # Verify the results - only log summary, not every sentence
         cursor.execute('''
-            SELECT s.sentence_number, s.text, b.user_order, p.page_number
+            SELECT COUNT(*) as count
             FROM sentences s
-            JOIN blocks b ON s.block_id = b.id
-            JOIN pages p ON s.page_id = p.id
             WHERE s.document_id = ?
-            ORDER BY s.sentence_number
         ''', (document_id,))
         
-        final_sentences = cursor.fetchall()
-        logger.debug("=== FINAL SENTENCES ===")
-        for sentence in final_sentences:
-            logger.debug(f"Sentence {sentence['sentence_number']}:")
-            logger.debug(f"  Text: {sentence['text']}")
-            logger.debug(f"  Block Order: {sentence['user_order']}")
-            logger.debug(f"  Page: {sentence['page_number']}")
+        final_count = cursor.fetchone()['count']
+        logger.debug(f"=== SYNC COMPLETE: {final_count} sentences synced ===")
         
         return True
         

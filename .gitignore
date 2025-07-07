@@ -1,3 +1,26 @@
 venv/
 .DS_Store
 node_modules/
+
+# Backend
+backend/uploads/
+backend/*.db
+backend/__pycache__/
+backend/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log

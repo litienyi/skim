@@ -15,7 +15,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = '/node_modules/pdfjs-dist/build/pdf.worker
 const API_URL = 'http://localhost:5001/api'
 
 // Memoized BlockOverlay component to prevent unnecessary re-renders
-const BlockOverlay = memo(({ blocks, scale, pageNumber, onBlockClick, activatedTexts, pageScale, rhetoricalLabels }) => {
+const BlockOverlay = memo(({ blocks, scale, pageNumber, onBlockClick, activatedTexts, pageScale, rhetoricalLabels, onAddMarker }) => {
   if (!blocks || !blocks[pageNumber - 1]) return null;
 
   return (
@@ -91,7 +91,7 @@ const BlockOverlay = memo(({ blocks, scale, pageNumber, onBlockClick, activatedT
                   }}
                   onClick={(e) => {
                     e.stopPropagation();
-                    // Handle word click for adding markers
+                    onAddMarker(word, pageNumber - 1, blockIndex);
                   }}
                 >
                   {!word.is_sentence_starter && (
@@ -168,7 +168,7 @@ const BlockOverlay = memo(({ blocks, scale, pageNumber, onBlockClick, activatedT
 });
 
 // Memoized Page component to prevent unnecessary re-renders
-const MemoizedPage = memo(({ pageNumber, scale, onLoadSuccess, onLoadError, onRenderSuccess, blocks, pageIndex, onBlockClick, activatedTexts, pageScale, rhetoricalLabels }) => {
+const MemoizedPage = memo(({ pageNumber, scale, onLoadSuccess, onLoadError, onRenderSuccess, blocks, pageIndex, onBlockClick, activatedTexts, pageScale, rhetoricalLabels, onAddMarker }) => {
   return (
     <div className="page-container position-relative" style={{
       width: '100%',
@@ -201,6 +201,7 @@ const MemoizedPage = memo(({ pageNumber, scale, onLoadSuccess, onLoadError, onRe
             activatedTexts={activatedTexts}
             pageScale={pageScale}
             rhetoricalLabels={rhetoricalLabels}
+            onAddMarker={onAddMarker}
           />
         )}
       </div>
@@ -357,14 +358,6 @@ const ChatPanel = ({ documentId }) => {
   // Fetch sentence count when documentId changes
   useEffect(() => {
     fetchSentenceCount();
-  }, [documentId]);
-
-  // Set up polling to update sentence count every 2 seconds
-  useEffect(() => {
-    if (!documentId) return;
-    
-    const interval = setInterval(fetchSentenceCount, 2000);
-    return () => clearInterval(interval);
   }, [documentId]);
 
   const handleSendMessage = async () => {
@@ -849,6 +842,7 @@ function App() {
 
       setFile(file);
       setPageNumber(1);
+      labelsLoadedRef.current = false;
     } catch (error) {
       console.error('Upload error:', error);
       console.error('Error details:', error);
@@ -1007,9 +1001,11 @@ function App() {
   }, [blocks, activatedTexts, wordPositions, pdfInfo]);
 
   // Add useEffect to fetch rhetorical labels when document is loaded
+  const labelsLoadedRef = useRef(false);
+  
   useEffect(() => {
     const fetchRhetoricalLabels = async () => {
-      if (pdfInfo?.document_id) {
+      if (pdfInfo?.document_id && !labelsLoadedRef.current) {
         try {
           console.log('=== FETCHING INITIAL LABELS ===');
           const response = await fetch(`${API_URL}/sentences/${pdfInfo.document_id}`);
@@ -1041,6 +1037,7 @@ function App() {
           console.log('Initial labels map:', labelsMap);
           console.log('Number of initial labels:', Object.keys(labelsMap).length);
           setRhetoricalLabels(labelsMap);
+          labelsLoadedRef.current = true;
         } catch (error) {
           console.error('Error fetching rhetorical labels:', error);
         }
@@ -1327,6 +1324,7 @@ function App() {
       setPageNumber(1);
       setActivatedTexts([]);
       setRhetoricalLabels({});
+      labelsLoadedRef.current = false;
       
       // Close the document browser
       setShowDocumentBrowser(false);
@@ -1467,6 +1465,7 @@ function App() {
                             activatedTexts={activatedTexts}
                             pageScale={pageScale}
                             rhetoricalLabels={rhetoricalLabels}
+                            onAddMarker={handleAddMarker}
                           />
                         ) : (
                           <div 
