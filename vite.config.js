@@ -16,6 +16,13 @@ export default defineConfig({
     fs: {
       // Allow serving files from one level up to the project root
       allow: ['..', 'node_modules']
+    },
+    proxy: {
+      '/api': {
+        target: 'http://localhost:5001',
+        changeOrigin: true,
+        secure: false
+      }
     }
   }
 })

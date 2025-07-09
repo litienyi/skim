@@ -9,11 +9,19 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import List
+import numpy as np
+import pandas as pd
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.decomposition import PCA
+import pickle
 from database import (
     init_db, get_document_id, save_page, save_block, save_sentence,
     get_document_blocks, get_document_sentences, save_words, get_block_words,
     get_db_connection, save_document, reinitialize_db, reset_sentence_numbers,
-    sync_sentences
+    sync_sentences, create_session, get_sessions, get_session, delete_session,
+    save_session_data, load_session_data
 )
 import time
 from google.api_core import retry
@@ -50,6 +58,69 @@ class ChatResponse(BaseModel):
     explanation: str
     answer: str
 
+# Pydantic schema for grid analysis
+class TextInput(BaseModel):
+    id: int
+    content: str
+
+class Reference(BaseModel):
+    quote: str
+    source: str
+    context: str
+    relevance: int
+
+class AnalysisResponse(BaseModel):
+    text_id: int
+    answer: str
+    references: List[Reference]
+    summary: str
+
+class GridAnalysisRequest(BaseModel):
+    texts: List[TextInput]
+    question: str
+
+class GridAnalysisResponse(BaseModel):
+    analyses: List[AnalysisResponse]
+
+# Clustering schemas
+class ClusteringRequest(BaseModel):
+    texts: List[TextInput]
+    method: str = "kmeans"  # "kmeans" or "dbscan"
+    n_clusters: int = 5
+    eps: float = 0.3  # for DBSCAN
+    min_samples: int = 2  # for DBSCAN
+
+class ClusterItem(BaseModel):
+    text_id: int
+    text: str
+    cluster_id: int
+    similarity_score: float
+
+class DimensionInfo(BaseModel):
+    dimension_id: int
+    type: str  # "original", "pca", "cluster"
+    name: str
+    description: str
+    variance_explained: float = None  # for PCA dimensions
+    top_features: List[str] = []  # for PCA dimensions
+
+class ClusterGroup(BaseModel):
+    cluster_id: int
+    items: List[ClusterItem]
+    centroid_text: str
+    size: int
+    semantic_definition: str
+    key_themes: List[str]
+    representative_examples: List[str]
+
+class ClusteringResponse(BaseModel):
+    clusters: List[ClusterGroup]
+    dimensions: List[DimensionInfo]
+    method: str
+    parameters: dict
+    total_items: int
+    pca_explained_variance: float = None
+
 app = Flask(__name__)
 
 # Configure upload folder
@@ -61,6 +132,315 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # Initialize database
 init_db()
+
+# Initialize sentence transformer model
+try:
+    sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+    logger.info("Sentence transformer model loaded successfully")
+except Exception as e:
+    logger.error(f"Failed to load sentence transformer model: {e}")
+    sentence_model = None
+
+def generate_semantic_definitions(texts, clusters, embeddings, pca_components=None):
+    """
+    Generate semantic definitions for dimensions and clusters using Gemini
+    """
+    try:
+        # Prepare text for Gemini analysis
+        analysis_text = "Analyze the following text collection and provide semantic definitions:\n\n"
+        
+        # Add original dimension info
+        analysis_text += "ORIGINAL DIMENSIONS (Text Content):\n"
+        for i, text in enumerate(texts[:5]):  # Show first 5 as examples
+            analysis_text += f"- Text {i+1}: {text.content[:200]}...\n"
+        if len(texts) > 5:
+            analysis_text += f"- ... and {len(texts)-5} more texts\n"
+        
+        # Add PCA dimension info if available
+        if pca_components is not None:
+            analysis_text += "\nPCA DIMENSIONS (Principal Components):\n"
+            for i in range(min(3, len(pca_components))):
+                analysis_text += f"- PCA Dimension {i+1}: Represents the {i+1}th principal component of semantic variation\n"
+        
+        # Add cluster info
+        analysis_text += "\nCLUSTERS:\n"
+        for cluster in clusters:
+            analysis_text += f"\nCluster {cluster.cluster_id} ({cluster.size} items):\n"
+            analysis_text += f"Centroid: {cluster.centroid_text}\n"
+            analysis_text += "Sample items:\n"
+            for item in cluster.items[:3]:  # Show top 3 items
+                analysis_text += f"- {item.text[:150]}...\n"
+        
+        analysis_text += "\n\nPlease provide:\n"
+        analysis_text += "1. Semantic definitions for each cluster (what themes/concepts they represent)\n"
+        analysis_text += "2. Key themes for each cluster\n"
+        analysis_text += "3. Representative examples for each cluster\n"
+        analysis_text += "4. Overall interpretation of the clustering results\n"
+        
+        # Use Gemini to generate semantic definitions
+        prompt = f"""
+        You are an expert data analyst specializing in semantic analysis and text clustering. 
+        Analyze the following clustering results and provide detailed semantic definitions.
+        
+        {analysis_text}
+        
+        Provide your response in the following JSON format:
+        {{
+            "clusters": [
+                {{
+                    "cluster_id": 0,
+                    "semantic_definition": "Description of what this cluster represents semantically",
+                    "key_themes": ["theme1", "theme2", "theme3"],
+                    "representative_examples": ["example1", "example2"]
+                }}
+            ],
+            "dimensions": [
+                {{
+                    "dimension_id": 0,
+                    "type": "original",
+                    "name": "Text Content",
+                    "description": "Original text content as input to the clustering algorithm"
+                }},
+                {{
+                    "dimension_id": 1,
+                    "type": "pca",
+                    "name": "PCA Dimension 1",
+                    "description": "First principal component representing the most significant semantic variation",
+                    "variance_explained": 0.45,
+                    "top_features": ["feature1", "feature2"]
+                }}
+            ],
+            "overall_interpretation": "Overall interpretation of the clustering results and what they reveal about the data"
+        }}
+        """
+        
+        response = model.generate_content(prompt)
+        result_text = response.text
+        
+        # Extract JSON from response
+        import re
+        json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+        if json_match:
+            import json
+            result = json.loads(json_match.group())
+            return result
+        else:
+            # Fallback: create basic definitions
+            return create_fallback_definitions(clusters, pca_components)
+            
+    except Exception as e:
+        logger.error(f"Error generating semantic definitions: {e}")
+        return create_fallback_definitions(clusters, pca_components)
+
+def create_fallback_definitions(clusters, pca_components=None):
+    """Create basic fallback definitions when Gemini fails"""
+    cluster_definitions = []
+    for cluster in clusters:
+        cluster_definitions.append({
+            "cluster_id": cluster.cluster_id,
+            "semantic_definition": f"Cluster {cluster.cluster_id} containing {cluster.size} items with centroid: {cluster.centroid_text[:100]}...",
+            "key_themes": ["theme1", "theme2"],
+            "representative_examples": [item.text[:100] + "..." for item in cluster.items[:2]]
+        })
+    
+    dimensions = [
+        {
+            "dimension_id": 0,
+            "type": "original",
+            "name": "Text Content",
+            "description": "Original text content as input to the clustering algorithm"
+        }
+    ]
+    
+    if pca_components is not None:
+        for i in range(min(3, len(pca_components))):
+            dimensions.append({
+                "dimension_id": i + 1,
+                "type": "pca",
+                "name": f"PCA Dimension {i+1}",
+                "description": f"Principal component {i+1} representing semantic variation",
+                "variance_explained": 0.1 + (0.1 * i),  # Placeholder values
+                "top_features": [f"feature_{i}_{j}" for j in range(3)]
+            })
+    
+    return {
+        "clusters": cluster_definitions,
+        "dimensions": dimensions,
+        "overall_interpretation": "Clustering analysis completed with basic semantic definitions."
+    }
+
+def perform_clustering(texts, method="kmeans", n_clusters=5, eps=0.3, min_samples=2):
+    """
+    Perform enhanced clustering on a list of texts using sentence transformers with PCA and semantic definitions
+    """
+    if not sentence_model:
+        raise Exception("Sentence transformer model not available")
+    
+    if not texts:
+        raise Exception("No texts provided for clustering")
+    
+    # Extract text content
+    text_list = [text.content for text in texts]
+    text_ids = [text.id for text in texts]
+    
+    # Generate embeddings
+    logger.info(f"Generating embeddings for {len(text_list)} texts")
+    embeddings = sentence_model.encode(text_list, show_progress_bar=True)
+    
+    # Perform PCA for dimension reduction and analysis
+    pca_components = None
+    pca_explained_variance = None
+    if len(embeddings) > 1 and embeddings.shape[1] > 1:
+        try:
+            # Determine optimal number of components
+            n_components = min(3, min(embeddings.shape[0], embeddings.shape[1]))
+            pca = PCA(n_components=n_components, random_state=42)
+            pca_result = pca.fit_transform(embeddings)
+            pca_components = pca_result
+            pca_explained_variance = float(sum(pca.explained_variance_ratio_))
+            logger.info(f"PCA performed with {n_components} components, explained variance: {pca_explained_variance:.3f}")
+        except Exception as e:
+            logger.warning(f"PCA failed: {e}")
+    
+    # Perform clustering
+    if method.lower() == "kmeans":
+        logger.info(f"Performing K-means clustering with {n_clusters} clusters")
+        clusterer = KMeans(n_clusters=min(n_clusters, len(texts)), random_state=42)
+        cluster_labels = clusterer.fit_predict(embeddings)
+        
+        # Calculate centroids
+        centroids = clusterer.cluster_centers_
+        centroid_texts = []
+        for i in range(len(centroids)):
+            # Find the text closest to the centroid
+            distances = np.linalg.norm(embeddings - centroids[i], axis=1)
+            closest_idx = np.argmin(distances)
+            centroid_texts.append(text_list[closest_idx])
+            
+    elif method.lower() == "dbscan":
+        logger.info(f"Performing DBSCAN clustering with eps={eps}, min_samples={min_samples}")
+        clusterer = DBSCAN(eps=eps, min_samples=min_samples)
+        cluster_labels = clusterer.fit_predict(embeddings)
+        
+        # For DBSCAN, use the most representative text from each cluster
+        centroid_texts = []
+        unique_labels = set(cluster_labels)
+        for label in unique_labels:
+            if label == -1:  # Noise points
+                continue
+            cluster_indices = np.where(cluster_labels == label)[0]
+            cluster_embeddings = embeddings[cluster_indices]
+            cluster_center = np.mean(cluster_embeddings, axis=0)
+            distances = np.linalg.norm(cluster_embeddings - cluster_center, axis=1)
+            closest_idx = cluster_indices[np.argmin(distances)]
+            centroid_texts.append(text_list[closest_idx])
+    else:
+        raise ValueError(f"Unsupported clustering method: {method}")
+    
+    # Calculate similarity scores for each item to its cluster centroid
+    similarity_scores = []
+    for i, label in enumerate(cluster_labels):
+        if label == -1:  # Noise point in DBSCAN
+            similarity_scores.append(0.0)
+        else:
+            if method.lower() == "kmeans":
+                centroid = centroids[label]
+            else:  # DBSCAN
+                cluster_indices = np.where(cluster_labels == label)[0]
+                cluster_embeddings = embeddings[cluster_indices]
+                centroid = np.mean(cluster_embeddings, axis=0)
+            
+            similarity = cosine_similarity([embeddings[i]], [centroid])[0][0]
+            similarity_scores.append(float(similarity))
+    
+    # Group items by cluster
+    clusters = []
+    unique_labels = sorted(set(cluster_labels))
+    
+    for label in unique_labels:
+        if label == -1:  # Skip noise points for now
+            continue
+            
+        cluster_indices = np.where(cluster_labels == label)[0]
+        cluster_items = []
+        
+        for idx in cluster_indices:
+            cluster_items.append(ClusterItem(
+                text_id=text_ids[idx],
+                text=text_list[idx],
+                cluster_id=int(label),
+                similarity_score=similarity_scores[idx]
+            ))
+        
+        # Sort by similarity score (highest first)
+        cluster_items.sort(key=lambda x: x.similarity_score, reverse=True)
+        
+        # Get centroid text
+        if method.lower() == "kmeans":
+            centroid_text = centroid_texts[label]
+        else:
+            centroid_idx = unique_labels.index(label)
+            centroid_text = centroid_texts[centroid_idx] if centroid_idx < len(centroid_texts) else cluster_items[0].text
+        
+        clusters.append(ClusterGroup(
+            cluster_id=int(label),
+            items=cluster_items,
+            centroid_text=centroid_text,
+            size=len(cluster_items),
+            semantic_definition="",  # Will be filled by semantic analysis
+            key_themes=[],
+            representative_examples=[]
+        ))
+    
+    # Sort clusters by size (largest first)
+    clusters.sort(key=lambda x: x.size, reverse=True)
+    
+    # Generate semantic definitions
+    logger.info("Generating semantic definitions...")
+    semantic_results = generate_semantic_definitions(texts, clusters, embeddings, pca_components)
+    
+    # Update clusters with semantic definitions
+    for cluster in clusters:
+        semantic_cluster = next((c for c in semantic_results["clusters"] if c["cluster_id"] == cluster.cluster_id), None)
+        if semantic_cluster:
+            cluster.semantic_definition = semantic_cluster["semantic_definition"]
+            cluster.key_themes = semantic_cluster["key_themes"]
+            cluster.representative_examples = semantic_cluster["representative_examples"]
+    
+    # Create dimension information
+    dimensions = []
+    
+    # Original dimensions
+    dimensions.append(DimensionInfo(
+        dimension_id=0,
+        type="original",
+        name="Text Content",
+        description="Original text content as input to the clustering algorithm"
+    ))
+    
+    # PCA dimensions
+    if pca_components is not None:
+        for i in range(min(3, pca_components.shape[1])):
+            pca_dim = next((d for d in semantic_results["dimensions"] if d["type"] == "pca" and d["dimension_id"] == i + 1), None)
+            dimensions.append(DimensionInfo(
+                dimension_id=i + 1,
+                type="pca",
+                name=pca_dim["name"] if pca_dim else f"PCA Dimension {i+1}",
+                description=pca_dim["description"] if pca_dim else f"Principal component {i+1} representing semantic variation",
+                variance_explained=pca_dim.get("variance_explained", 0.1 + (0.1 * i)) if pca_dim else 0.1 + (0.1 * i),
+                top_features=pca_dim.get("top_features", [f"feature_{i}_{j}" for j in range(3)]) if pca_dim else [f"feature_{i}_{j}" for j in range(3)]
+            ))
+    
+    # Cluster dimensions
+    for i, cluster in enumerate(clusters):
+        dimensions.append(DimensionInfo(
+            dimension_id=len(dimensions),
+            type="cluster",
+            name=f"Cluster {cluster.cluster_id}",
+            description=cluster.semantic_definition
+        ))
+    
+    return clusters, dimensions, pca_explained_variance
 
 @app.route('/')
 def home():
@@ -1348,6 +1728,280 @@ def rename_document(document_id):
     except Exception as e:
         logger.error(f"Error renaming document: {e}")
         return jsonify({'error': 'Failed to rename document'}), 500
+
+@app.route('/api/analyze', methods=['POST'])
+def analyze_texts():
+    def process_batch(batch, question):
+        # Helper to process a batch, recursively splitting if Gemini response is too long/incomplete
+        logger = app.logger
+        batch_context = "\n\n".join([
+            f"Text {text['id']}: {text['content']}"
+            for text in batch
+        ])
+        prompt = f'''Analyze the following texts in response to this question: "{question}"
+
+{batch_context}
+
+For each text, provide:
+1. A direct answer to the question based on that text
+2. Specific quotes from the text that support your answer
+3. A brief summary of the text's relevance
+4. Relevance score (0-100) for each reference
+
+Provide your response as a JSON array where each element corresponds to one text input.'''
+        logger.debug(f"Sending batch of {len(batch)} to Gemini...")
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                "temperature": 0.1,
+                "max_output_tokens": 4096,
+                "response_mime_type": "application/json",
+                "response_schema": GridAnalysisResponse
+            }
+        )
+        logger.debug("Received batch response from Gemini")
+        try:
+            # Try to use the parsed response first
+            if hasattr(response, 'parsed') and response.parsed:
+                batch_result = response.parsed
+                logger.debug("Using parsed structured response")
+            else:
+                import json
+                batch_result = json.loads(response.text)
+                logger.debug("Using manually parsed response")
+            logger.debug(f"Batch result: {batch_result}")
+            # Add batch results to all analyses
+            if hasattr(batch_result, 'analyses'):
+                return list(batch_result.analyses)
+            elif 'analyses' in batch_result:
+                return list(batch_result['analyses'])
+            else:
+                return list(batch_result)
+        except Exception as parse_error:
+            logger.error(f"Error parsing batch response: {parse_error}")
+            logger.error(f"Raw batch response text: {response.text}")
+            # If batch size > 1, split and retry recursively
+            if len(batch) > 1:
+                mid = len(batch) // 2
+                logger.warning(f"Splitting batch of {len(batch)} into {len(batch[:mid])} and {len(batch[mid:])}")
+                return process_batch(batch[:mid], question) + process_batch(batch[mid:], question)
+            else:
+                # Only one text, mark as error
+                return [{
+                    'text_id': batch[0]['id'],
+                    'answer': 'Error processing this text.',
+                    'references': [],
+                    'summary': 'Processing error occurred.'
+                }]
+
+    try:
+        logger = app.logger
+        logger.debug("=== GRID ANALYSIS REQUEST ===")
+        data = request.get_json()
+        # Validate request data
+        if not data or 'texts' not in data or 'question' not in data:
+            return jsonify({'error': 'Missing required fields: texts and question'}), 400
+        texts = data['texts']
+        question = data['question']
+        if not texts or not question.strip():
+            return jsonify({'error': 'Texts and question cannot be empty'}), 400
+        logger.debug(f"Question: {question}")
+        logger.debug(f"Number of texts: {len(texts)}")
+        batch_size = 10
+        all_analyses = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            results = process_batch(batch, question)
+            all_analyses.extend(results)
+        logger.debug(f"Total analyses generated: {len(all_analyses)}")
+        return jsonify({'analyses': all_analyses})
+    except Exception as e:
+        logger.error(f"Error in analyze endpoint: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# Session management endpoints
+@app.route('/api/sessions', methods=['GET'])
+def list_sessions():
+    """Get all sessions."""
+    try:
+        sessions = get_sessions()
+        return jsonify({'sessions': sessions})
+    except Exception as e:
+        logger.error(f"Error listing sessions: {e}")
+        return jsonify({'error': 'Failed to list sessions'}), 500
+
+@app.route('/api/sessions', methods=['POST'])
+def create_new_session():
+    """Create a new session."""
+    try:
+        data = request.get_json()
+        name = data.get('name', '').strip()
+        description = data.get('description', '').strip()
+        
+        if not name:
+            return jsonify({'error': 'Session name is required'}), 400
+        
+        session_id = create_session(name, description)
+        session = get_session(session_id)
+        
+        return jsonify({'session': session, 'message': 'Session created successfully'})
+    except Exception as e:
+        logger.error(f"Error creating session: {e}")
+        return jsonify({'error': 'Failed to create session'}), 500
+
+@app.route('/api/sessions/<int:session_id>', methods=['GET'])
+def get_session_by_id(session_id):
+    """Get a specific session."""
+    try:
+        session = get_session(session_id)
+        if not session:
+            return jsonify({'error': 'Session not found'}), 404
+        
+        return jsonify({'session': session})
+    except Exception as e:
+        logger.error(f"Error getting session: {e}")
+        return jsonify({'error': 'Failed to get session'}), 500
+
+@app.route('/api/sessions/<int:session_id>', methods=['DELETE'])
+def delete_session_by_id(session_id):
+    """Delete a session."""
+    try:
+        session = get_session(session_id)
+        if not session:
+            return jsonify({'error': 'Session not found'}), 404
+        
+        delete_session(session_id)
+        return jsonify({'message': 'Session deleted successfully'})
+    except Exception as e:
+        logger.error(f"Error deleting session: {e}")
+        return jsonify({'error': 'Failed to delete session'}), 500
+
+@app.route('/api/sessions/<int:session_id>/save', methods=['POST'])
+def save_session_data_endpoint(session_id):
+    """Save session data."""
+    try:
+        session = get_session(session_id)
+        if not session:
+            return jsonify({'error': 'Session not found'}), 404
+        
+        data = request.get_json()
+        spreadsheet_data = data.get('data', [])
+        column_configs = data.get('columnConfigs', {})
+        
+        save_session_data(session_id, spreadsheet_data, column_configs)
+        
+        return jsonify({'message': 'Session data saved successfully'})
+    except Exception as e:
+        logger.error(f"Error saving session data: {e}")
+        return jsonify({'error': 'Failed to save session data'}), 500
+
+@app.route('/api/sessions/<int:session_id>/load', methods=['GET'])
+def load_session_data_endpoint(session_id):
+    """Load session data."""
+    try:
+        session = get_session(session_id)
+        if not session:
+            return jsonify({'error': 'Session not found'}), 404
+        
+        cell_data, column_configs = load_session_data(session_id)
+        
+        # Convert to frontend format
+        data = []
+        column_configs_dict = {}
+        
+        # Process cell data
+        for cell_row in cell_data:
+            while len(data) <= cell_row['row_index']:
+                data.append([])
+            
+            while len(data[cell_row['row_index']]) <= cell_row['col_index']:
+                data[cell_row['row_index']].append({
+                    'id': f"cell-{cell_row['row_index']}-{cell_row['col_index']}",
+                    'value': '',
+                    'result': '',
+                    'status': '',
+                    'references': []
+                })
+            
+            # Parse references JSON
+            references = []
+            if cell_row['cell_references']:
+                try:
+                    references = json.loads(cell_row['cell_references'])
+                except:
+                    references = []
+            
+            data[cell_row['row_index']][cell_row['col_index']] = {
+                'id': f"cell-{cell_row['row_index']}-{cell_row['col_index']}",
+                'value': cell_row['cell_value'] or '',
+                'result': cell_row['cell_result'] or '',
+                'status': cell_row['cell_status'] or '',
+                'references': references
+            }
+        
+        # Process column configurations
+        for config_row in column_configs:
+            column_configs_dict[config_row['col_index']] = {
+                'name': config_row['column_name'] or '',
+                'referenceCol': config_row['reference_col'],
+                'prompt': config_row['prompt'] or ''
+            }
+        
+        return jsonify({
+            'data': data,
+            'columnConfigs': column_configs_dict
+        })
+    except Exception as e:
+        logger.error(f"Error loading session data: {e}")
+        return jsonify({'error': 'Failed to load session data'}), 500
+
+@app.route('/api/cluster', methods=['POST'])
+def cluster_texts():
+    """Cluster texts using sentence transformers."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        # Validate request
+        clustering_request = ClusteringRequest(**data)
+        
+        if not clustering_request.texts:
+            return jsonify({'error': 'No texts provided for clustering'}), 400
+        
+        logger.info(f"Clustering {len(clustering_request.texts)} texts using {clustering_request.method}")
+        
+        # Perform enhanced clustering
+        clusters, dimensions, pca_explained_variance = perform_clustering(
+            texts=clustering_request.texts,
+            method=clustering_request.method,
+            n_clusters=clustering_request.n_clusters,
+            eps=clustering_request.eps,
+            min_samples=clustering_request.min_samples
+        )
+        
+        # Prepare response
+        parameters = {
+            'method': clustering_request.method,
+            'n_clusters': clustering_request.n_clusters if clustering_request.method == 'kmeans' else None,
+            'eps': clustering_request.eps if clustering_request.method == 'dbscan' else None,
+            'min_samples': clustering_request.min_samples if clustering_request.method == 'dbscan' else None
+        }
+        
+        response = ClusteringResponse(
+            clusters=clusters,
+            dimensions=dimensions,
+            method=clustering_request.method,
+            parameters=parameters,
+            total_items=len(clustering_request.texts),
+            pca_explained_variance=pca_explained_variance
+        )
+        
+        return jsonify(response.dict())
+        
+    except Exception as e:
+        logger.error(f"Error in clustering: {e}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     logger.info("Starting Flask server...")

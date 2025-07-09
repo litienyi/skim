@@ -2,6 +2,7 @@ import sqlite3
 import os
 from pathlib import Path
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,57 @@ def init_db():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_words_block ON words(block_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_sentences_doc_page ON sentences(document_id, page_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_sentences_block ON sentences(block_id)')
+
+        # Create sessions table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+
+        # Create session_data table to store spreadsheet data
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS session_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            row_index INTEGER NOT NULL,
+            col_index INTEGER NOT NULL,
+            cell_value TEXT,
+            cell_result TEXT,
+            cell_status TEXT,
+            cell_references TEXT,  -- JSON string of references
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES sessions (id),
+            UNIQUE(session_id, row_index, col_index)
+        )
+        ''')
+
+        # Create session_column_configs table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS session_column_configs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            col_index INTEGER NOT NULL,
+            column_name TEXT,
+            reference_col INTEGER,
+            prompt TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES sessions (id),
+            UNIQUE(session_id, col_index)
+        )
+        ''')
+
+        # Create indexes for session tables
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_session_data_session ON session_data(session_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_session_data_cell ON session_data(session_id, row_index, col_index)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_session_column_configs_session ON session_column_configs(session_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_session_column_configs_col ON session_column_configs(session_id, col_index)')
 
         conn.commit()
     except Exception as e:
@@ -510,155 +562,202 @@ def reset_sentence_numbers(document_id, page_id, block_id):
         conn.close()
 
 def sync_sentences(document_id):
-    """Synchronize sentences between words and sentences tables."""
+    """Sync sentences with words table."""
     conn = get_db_connection()
     cursor = conn.cursor()
+    
     try:
-        logger.debug("=== STARTING SENTENCE SYNC ===")
-        logger.debug(f"Document ID: {document_id}")
-        
-        # First, get all activated blocks in user-defined order with their words
+        # Get all words for the document
         cursor.execute('''
-            SELECT 
-                b.id as block_id,
-                b.page_id,
-                b.user_order,
-                b.text as block_text,
-                p.page_number,
-                b.block_number,
-                w.word_number,
-                w.text as word_text,
-                w.is_sentence_starter,
-                w.sentence_number
-            FROM blocks b
-            JOIN pages p ON b.page_id = p.id
-            JOIN words w ON w.block_id = b.id AND w.page_id = b.page_id
-            WHERE b.document_id = ? AND b.user_order IS NOT NULL
-            ORDER BY b.user_order, w.word_number
-        ''', (document_id,))
-        
-        rows = cursor.fetchall()
-        if not rows:
-            logger.warning(f"No activated blocks found for document {document_id}")
-            return False
-
-        logger.debug(f"Found {len(rows)} words across all blocks")
-        
-        # Delete existing sentences for this document
-        cursor.execute('DELETE FROM sentences WHERE document_id = ?', (document_id,))
-        logger.debug("Deleted existing sentences")
-        
-        # Process words to build sentences across blocks
-        current_sentence = []
-        current_sentence_number = 1
-        current_block_id = None
-        current_page_id = None
-        current_block_order = None
-        
-        logger.debug("=== PROCESSING WORDS ===")
-        for i, row in enumerate(rows):
-            # Only log every 500th word to reduce verbosity even more
-            if i % 500 == 0:
-                logger.debug(f"Processing word {i}: '{row['word_text']}' (Block {row['block_id']}, Order {row['user_order']}, Starter: {row['is_sentence_starter']})")
-            
-            # If this is a sentence starter and we have a current sentence, save it
-            if row['is_sentence_starter'] and current_sentence:
-                sentence_text = ' '.join(current_sentence)
-                logger.debug(f"Saving sentence {current_sentence_number}:")
-                logger.debug(f"  Text: {sentence_text}")
-                logger.debug(f"  Block: {current_block_id} (Order: {current_block_order})")
-                logger.debug(f"  Page: {current_page_id}")
-                
-                # Save the current sentence
-                cursor.execute('''
-                    INSERT INTO sentences (
-                        document_id, page_id, block_id, sentence_number, text
-                    ) VALUES (?, ?, ?, ?, ?)
-                ''', (
-                    document_id,
-                    current_page_id,
-                    current_block_id,
-                    current_sentence_number,
-                    sentence_text
-                ))
-                current_sentence_number += 1
-                current_sentence = []
-            
-            # Add the current word to the sentence
-            current_sentence.append(row['word_text'])
-            current_block_id = row['block_id']
-            current_page_id = row['page_id']
-            current_block_order = row['user_order']
-        
-        # Save the last sentence if there are any remaining words
-        if current_sentence:
-            sentence_text = ' '.join(current_sentence)
-            logger.debug(f"Saving final sentence {current_sentence_number}:")
-            logger.debug(f"  Text: {sentence_text}")
-            logger.debug(f"  Block: {current_block_id} (Order: {current_block_order})")
-            logger.debug(f"  Page: {current_page_id}")
-            
-            cursor.execute('''
-                INSERT INTO sentences (
-                    document_id, page_id, block_id, sentence_number, text
-                ) VALUES (?, ?, ?, ?, ?)
-            ''', (
-                document_id,
-                current_page_id,
-                current_block_id,
-                current_sentence_number,
-                sentence_text
-            ))
-        
-        # Update sentence numbers in words table
-        cursor.execute('''
-            UPDATE words
-            SET sentence_number = NULL
-            WHERE document_id = ?
-        ''', (document_id,))
-        logger.debug("Reset sentence numbers in words table")
-        
-        # Get all sentence starters and update their sentence numbers
-        cursor.execute('''
-            SELECT w.id, w.word_number, w.is_sentence_starter, b.user_order, w.text
+            SELECT w.id, w.text, w.is_sentence_starter, w.sentence_number
             FROM words w
-            JOIN blocks b ON w.block_id = b.id
-            WHERE w.document_id = ? AND b.user_order IS NOT NULL
-            ORDER BY b.user_order, w.word_number
+            JOIN pages p ON w.page_id = p.id
+            WHERE p.document_id = ?
+            ORDER BY p.page_number, w.block_id, w.word_number
         ''', (document_id,))
         
         words = cursor.fetchall()
-        current_sentence_number = 1
         
-        logger.debug("=== UPDATING SENTENCE NUMBERS ===")
+        # Process words to assign sentence numbers
+        current_sentence = 1
         for word in words:
             if word['is_sentence_starter']:
-                logger.debug(f"Setting sentence number {current_sentence_number} for word: '{word['text']}' (Block order: {word['user_order']})")
-                cursor.execute('''
-                    UPDATE words
-                    SET sentence_number = ?
-                    WHERE id = ?
-                ''', (current_sentence_number, word['id']))
-                current_sentence_number += 1
+                current_sentence += 1
+            
+            # Update word with sentence number
+            cursor.execute('''
+                UPDATE words 
+                SET sentence_number = ? 
+                WHERE id = ?
+            ''', (current_sentence, word['id']))
         
         conn.commit()
-        logger.debug(f"Successfully synced {current_sentence_number - 1} sentences for document {document_id}")
-        
-        # Verify the results - only log summary, not every sentence
-        cursor.execute('''
-            SELECT COUNT(*) as count
-            FROM sentences s
-            WHERE s.document_id = ?
-        ''', (document_id,))
-        
-        final_count = cursor.fetchone()['count']
-        logger.debug(f"=== SYNC COMPLETE: {final_count} sentences synced ===")
-        
-        return True
+        logger.info(f"Synced sentences for document {document_id}")
         
     except Exception as e:
-        conn.rollback()
         logger.error(f"Error syncing sentences: {str(e)}")
-        return False
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+# Session management functions
+def create_session(name, description=""):
+    """Create a new session and return its ID."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            INSERT INTO sessions (name, description)
+            VALUES (?, ?)
+        ''', (name, description))
+        
+        session_id = cursor.lastrowid
+        conn.commit()
+        return session_id
+    except Exception as e:
+        logger.error(f"Error creating session: {str(e)}")
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def get_sessions():
+    """Get all sessions."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            SELECT id, name, description, created_at, updated_at
+            FROM sessions
+            ORDER BY updated_at DESC
+        ''')
+        
+        sessions = cursor.fetchall()
+        return [dict(session) for session in sessions]
+    except Exception as e:
+        logger.error(f"Error getting sessions: {str(e)}")
+        raise
+    finally:
+        conn.close()
+
+def get_session(session_id):
+    """Get a specific session by ID."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            SELECT id, name, description, created_at, updated_at
+            FROM sessions
+            WHERE id = ?
+        ''', (session_id,))
+        
+        session = cursor.fetchone()
+        return dict(session) if session else None
+    except Exception as e:
+        logger.error(f"Error getting session: {str(e)}")
+        raise
+    finally:
+        conn.close()
+
+def delete_session(session_id):
+    """Delete a session and all its data."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Delete session data first (due to foreign key constraints)
+        cursor.execute('DELETE FROM session_data WHERE session_id = ?', (session_id,))
+        cursor.execute('DELETE FROM session_column_configs WHERE session_id = ?', (session_id,))
+        cursor.execute('DELETE FROM sessions WHERE id = ?', (session_id,))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting session: {str(e)}")
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def save_session_data(session_id, data, column_configs):
+    """Save session data and column configurations."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Clear existing data
+        cursor.execute('DELETE FROM session_data WHERE session_id = ?', (session_id,))
+        cursor.execute('DELETE FROM session_column_configs WHERE session_id = ?', (session_id,))
+        
+        # Save cell data
+        for row_index, row in enumerate(data):
+            for col_index, cell in enumerate(row):
+                if cell.get('value') or cell.get('result') or cell.get('status') or (cell.get('references') and len(cell.get('references', [])) > 0):
+                    references_json = json.dumps(cell.get('references', [])) if cell.get('references') else None
+                    cursor.execute('''
+                        INSERT INTO session_data 
+                        (session_id, row_index, col_index, cell_value, cell_result, cell_status, cell_references)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (session_id, row_index, col_index, cell.get('value', ''), cell.get('result', ''), cell.get('status', ''), references_json))
+        
+        # Save column configurations
+        for col_index, config in column_configs.items():
+            if config:
+                cursor.execute('''
+                    INSERT INTO session_column_configs 
+                    (session_id, col_index, column_name, reference_col, prompt)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (session_id, col_index, config.get('name', ''), config.get('referenceCol'), config.get('prompt', '')))
+        
+        # Update session timestamp
+        cursor.execute('''
+            UPDATE sessions 
+            SET updated_at = CURRENT_TIMESTAMP 
+            WHERE id = ?
+        ''', (session_id,))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Error saving session data: {str(e)}")
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def load_session_data(session_id):
+    """Load session data and column configurations."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Load cell data
+        cursor.execute('''
+            SELECT row_index, col_index, cell_value, cell_result, cell_status, cell_references
+            FROM session_data
+            WHERE session_id = ?
+            ORDER BY row_index, col_index
+        ''', (session_id,))
+        
+        cell_data = cursor.fetchall()
+        
+        # Load column configurations
+        cursor.execute('''
+            SELECT col_index, column_name, reference_col, prompt
+            FROM session_column_configs
+            WHERE session_id = ?
+            ORDER BY col_index
+        ''', (session_id,))
+        
+        column_configs = cursor.fetchall()
+        
+        return cell_data, column_configs
+    except Exception as e:
+        logger.error(f"Error loading session data: {str(e)}")
+        raise
     finally:
         conn.close() 
