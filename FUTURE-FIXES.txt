@@ -1,0 +1,6 @@
+1. add clear chat option button
+2. if response too long, send message in response: "The answer to your question is too long. Please ask a narrower question or adjust the context window"
+3. chat page range not propagated corrected to chat response. e.g. context sent to gemini might be pages 1-100, and gemini sees pages 1-100, but response message reads "context: pages 1-344""
+4. chat page range not inherited for next message. If users selected pages 1-100 for context now, then auto set 1-100 for next message. (always based on last message. If there is no chat history, set to full range)
+5. where are pdfs stored? PLease tell me. No changes needed.
+6. auto scroll to bottom 

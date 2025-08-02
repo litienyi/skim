@@ -613,3 +613,140 @@
     gap: 10px;
   }
 }
+
+/* Enhanced highlight styling for PDF text fragments */
+.highlighted-fragment {
+  background-color: rgba(255, 224, 102, 0.8) !important; /* 80% opacity yellow */
+  color: #000 !important; /* Black text */
+  border-radius: 2px !important;
+  padding: 1px 2px !important;
+  box-shadow: none !important;
+  opacity: 1 !important;
+  visibility: visible !important;
+  display: inline !important;
+  position: static !important;
+  z-index: auto !important;
+  text-shadow: none !important;
+  font-weight: inherit !important;
+  line-height: inherit !important;
+  vertical-align: baseline !important;
+  margin: 0 !important;
+  border: none !important;
+}
+
+/* Landing Modal Styles */
+.modal-overlay {
+  animation: fadeIn 0.3s ease-out;
+}
+
+.modal-content {
+  animation: slideIn 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-20px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.modal-content .card {
+  transition: all 0.3s ease;
+  transform: translateY(0);
+}
+
+.modal-content .card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+}
+
+.modal-content .card:active {
+  transform: translateY(-2px);
+}
+
+/* Document list item hover effects */
+.modal-content .card.mb-2 {
+  transition: all 0.2s ease;
+}
+
+.modal-content .card.mb-2:hover {
+  transform: translateX(4px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+/* Loading spinner enhancement */
+.spinner-border-sm {
+  width: 1rem;
+  height: 1rem;
+}
+
+/* Responsive modal adjustments */
+@media (max-width: 768px) {
+  .modal-content {
+    padding: 20px;
+    margin: 20px;
+  }
+  
+  .modal-content .row {
+    flex-direction: column;
+  }
+  
+  .modal-content .col-md-6 {
+    width: 100%;
+    margin-bottom: 16px;
+  }
+}
+
+/* Document action buttons */
+.document-actions .btn {
+  transition: all 0.2s ease;
+}
+
+.document-actions .btn:hover {
+  transform: scale(1.1);
+}
+
+.document-actions .btn:active {
+  transform: scale(0.95);
+}
+
+/* Edit mode input styling */
+.document-edit-input {
+  border: 2px solid #3182ce;
+  border-radius: 6px;
+  transition: border-color 0.2s ease;
+}
+
+.document-edit-input:focus {
+  border-color: #2c5aa0;
+  box-shadow: 0 0 0 0.2rem rgba(49, 130, 206, 0.25);
+}
+
+/* Delete confirmation modal */
+.delete-confirmation-modal {
+  animation: slideIn 0.3s ease-out;
+}
+
+.delete-confirmation-modal .modal-content {
+  border: 2px solid #dc3545;
+}
+
+@keyframes fadeInOut {
+  0% { opacity: 0; transform: translateY(-10px); }
+  20% { opacity: 1; transform: translateY(0); }
+  80% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-10px); }
+}

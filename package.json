@@ -11,11 +11,14 @@
   },
   "dependencies": {
     "bootstrap": "^5.3.6",
+    "bootstrap-icons": "^1.13.1",
     "canvas": "^3.1.0",
+    "fuzzball": "^2.2.2",
     "lodash": "^4.17.21",
     "pdfjs-dist": "4.8.69",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
     "react-pdf": "9.2.1"
   },
   "devDependencies": {
