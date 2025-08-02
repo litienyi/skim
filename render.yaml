@@ -1,0 +1,40 @@
+services:
+  # Backend API
+  - type: web
+    name: skim2-backend
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT backend.app_secure:app
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: skim2-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: skim2-redis
+          property: connectionString
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: SECRET_KEY
+        generateValue: true
+      - key: GOOGLE_API_KEY
+        sync: false
+    healthCheckPath: /health
+    autoDeploy: true
+
+  # PostgreSQL Database
+  - type: pserv
+    name: skim2-db
+    env: postgresql
+    plan: free
+    ipAllowList: []
+
+  # Redis Cache
+  - type: redis
+    name: skim2-redis
+    plan: free
+    ipAllowList: [] 
