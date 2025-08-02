@@ -9,19 +9,15 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from typing import List
 from database import (
-    init_db, get_db_session, User, Session, Document, Page, Word, Highlight, ChatSession, ChatMessage
+    init_db, get_db_session, User, Document, Page, Word, Highlight, ChatSession, ChatMessage
 )
-from datetime import datetime
-import pytesseract
+from datetime import datetime, timedelta
 from PIL import Image
 from flask_openapi3 import OpenAPI, Info, Tag, APIBlueprint
 from werkzeug.security import generate_password_hash, check_password_hash
-import secrets
 import jwt
 from functools import wraps
-import uuid
 from flask_cors import CORS
-import time
 import re
 
 # Load environment variables
@@ -30,6 +26,13 @@ load_dotenv()
 # Configure logging first
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# JWT Configuration
+JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY')
+if not JWT_SECRET_KEY:
+    raise ValueError("JWT_SECRET_KEY environment variable is required")
+JWT_ALGORITHM = 'HS256'
+JWT_EXPIRATION_HOURS = 24
 
 # Configure Gemini
 api_key = os.getenv('GOOGLE_API_KEY')
@@ -47,6 +50,91 @@ logger.info("=== BACKEND MODEL CONFIG DEBUG ===")
 logger.info(f"Model name: {model.model_name}")
 logger.info(f"Model type: {type(model)}")
 logger.info("===================================")
+
+# Authentication decorators
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        auth_header = request.headers.get('Authorization')
+        
+        if auth_header:
+            try:
+                token = auth_header.split(" ")[1]  # Bearer <token>
+            except IndexError:
+                return jsonify({'error': 'Invalid token format'}), 401
+        
+        if not token:
+            return jsonify({'error': 'Token is missing'}), 401
+        
+        try:
+            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+            session = get_db_session()
+            current_user = session.query(User).filter_by(id=payload['user_id']).first()
+            session.close()
+            
+            if not current_user:
+                return jsonify({'error': 'User not found'}), 401
+                
+        except jwt.ExpiredSignatureError:
+            return jsonify({'error': 'Token has expired'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+        
+        return f(current_user, *args, **kwargs)
+    return decorated
+
+def document_owner_required(f):
+    @wraps(f)
+    def decorated(current_user, document_id, *args, **kwargs):
+        session = get_db_session()
+        document = session.query(Document).filter_by(
+            id=document_id, 
+            user_id=current_user.id
+        ).first()
+        session.close()
+        
+        if not document:
+            return jsonify({'error': 'Document not found or access denied'}), 404
+        
+        return f(current_user, document, *args, **kwargs)
+    return decorated
+
+# JWT token generation
+def generate_token(user_id):
+    """Generate a JWT token for a user."""
+    payload = {
+        'user_id': user_id,
+        'exp': datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS),
+        'iat': datetime.utcnow()
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+def get_current_user_from_token():
+    """Get current user from JWT token without using decorator."""
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return None
+    
+    try:
+        # Extract token from "Bearer <token>"
+        token = auth_header.split(' ')[1] if ' ' in auth_header else auth_header
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        user_id = payload['user_id']
+        
+        # Get user from database
+        session = get_db_session()
+        user = session.query(User).filter_by(id=user_id).first()
+        session.close()
+        
+        return user
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+    except Exception as e:
+        logger.error(f"Token validation error: {str(e)}")
+        return None
 
 # OpenAPI schema for /api/chat response
 # Define OpenAPI schemas for Gemini API
@@ -244,62 +332,117 @@ def parse_page_ranges(page_range_input):
 
 def extract_word_boxes(image):
     # Returns a list of dicts: {text, x, y, width, height, confidence}
-    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
-    words = []
-    n = len(data['text'])
-    for i in range(n):
-        if data['text'][i].strip() != '':
-            words.append({
-                'text': data['text'][i],
-                'x': data['left'][i],
-                'y': data['top'][i],
-                'width': data['width'][i],
-                'height': data['height'][i],
-                'confidence': float(data['conf'][i]) if data['conf'][i] != '-1' else None
-            })
-    return words
+    # This function is no longer needed since we're not using OCR
+    # PyMuPDF handles text extraction more efficiently
+    return []
 
-SECRET_KEY = os.getenv('SECRET_KEY', 'dev_secret')
+SECRET_KEY = os.getenv('SECRET_KEY')
+if not SECRET_KEY:
+    raise ValueError("SECRET_KEY environment variable is required")
 
-# --- Session Management (per document upload) ---
-def get_or_create_session_token(document_id):
-    session = get_db_session()
-    # Try to find an existing session for this document
-    doc_session = session.query(Session).filter_by(document_id=document_id).first()
-    if doc_session:
-        token = doc_session.session_token
-    else:
-        token = str(uuid.uuid4())
-        doc_session = Session(
-            document_id=document_id,
-            session_token=token,
-            created_at=datetime.now(),
-            expires_at=None
-        )
-        session.add(doc_session)
-        session.commit()
-    session.close()
-    return token
-
-def session_token_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = request.headers.get('Authorization')
-        if not token:
-            return jsonify({'error': 'Session token is missing!'}), 401
+# Authentication endpoints
+@app.route('/api/auth/register', methods=['POST'])
+def register():
+    """Register a new user."""
+    try:
+        data = request.get_json()
+        username = data.get('username')
+        email = data.get('email')
+        password = data.get('password')
+        
+        if not username or not email or not password:
+            return jsonify({'error': 'Username, email, and password are required'}), 400
+        
         session = get_db_session()
-        doc_session = session.query(Session).filter_by(session_token=token).first()
-        if not doc_session:
+        
+        # Check if user already exists
+        existing_user = session.query(User).filter(
+            (User.username == username) | (User.email == email)
+        ).first()
+        
+        if existing_user:
             session.close()
-            return jsonify({'error': 'Session token is invalid!'}), 401
-        document_id = doc_session.document_id
+            return jsonify({'error': 'Username or email already exists'}), 409
+        
+        # Create new user
+        password_hash = generate_password_hash(password)
+        new_user = User(
+            username=username,
+            email=email,
+            password_hash=password_hash
+        )
+        
+        session.add(new_user)
+        session.commit()
+        
+        # Generate token
+        token = generate_token(new_user.id)
+        
         session.close()
-        return f(document_id, *args, **kwargs)
-    return decorated
+        
+        return jsonify({
+            'message': 'User registered successfully',
+            'token': token,
+            'user': {
+                'id': new_user.id,
+                'username': new_user.username,
+                'email': new_user.email
+            }
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"Error registering user: {e}")
+        return jsonify({'error': 'Failed to register user'}), 500
 
-# Update upload_file to generate and return a session token
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    """Login user and return JWT token."""
+    try:
+        data = request.get_json()
+        username = data.get('username')
+        password = data.get('password')
+        
+        if not username or not password:
+            return jsonify({'error': 'Username and password are required'}), 400
+        
+        session = get_db_session()
+        user = session.query(User).filter_by(username=username).first()
+        session.close()
+        
+        if not user or not check_password_hash(user.password_hash, password):
+            return jsonify({'error': 'Invalid username or password'}), 401
+        
+        # Generate token
+        token = generate_token(user.id)
+        
+        return jsonify({
+            'message': 'Login successful',
+            'token': token,
+            'user': {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Error logging in: {e}")
+        return jsonify({'error': 'Failed to login'}), 500
+
+@app.route('/api/auth/me', methods=['GET'])
+@token_required
+def get_current_user(current_user):
+    """Get current user information."""
+    return jsonify({
+        'id': current_user.id,
+        'username': current_user.username,
+        'email': current_user.email
+    })
+
+# Update upload endpoint to require authentication
 @app.route('/api/upload', methods=['POST'])
-def upload_file():
+@token_required
+def upload_file(current_user):
     session = get_db_session()
     try:
         logger.debug("=== UPLOAD REQUEST ===")
@@ -318,15 +461,14 @@ def upload_file():
             doc = fitz.open(input_path)
             num_pages = doc.page_count
             extracted_text = []
-            ocr_pages = []
 
-            # Create Document ORM entry
+            # Create Document ORM entry with user_id
             document = Document(
                 filename=unique_filename,
                 original_filename=file.filename,
+                user_id=current_user.id,  # Associate with current user
                 created_at=datetime.now(),
                 num_pages=num_pages,
-                ocr_status='pending',
                 meta={}
             )
             session.add(document)
@@ -335,39 +477,30 @@ def upload_file():
             for i in range(num_pages):
                 page = doc.load_page(i)
                 text = page.get_text()
-                if not text.strip():
-                    # Run OCR if no text found
-                    pix = page.get_pixmap()
-                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    ocr_text = pytesseract.image_to_string(img)
-                    text = ocr_text
-                    ocr_pages.append(i+1)
                 extracted_text.append(text)
 
                 # Save page ORM entry
                 page_orm = Page(
                     document_id=document.id,
                     page_number=i+1,
-                    ocr_text=text,
+                    text_content=text,
                     created_at=datetime.now()
                 )
                 session.add(page_orm)
                 session.commit()
 
-                # Extract and save word bounding boxes
-                pix = page.get_pixmap()
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                word_boxes = extract_word_boxes(img)
-                for idx, word in enumerate(word_boxes):
+                # Extract and save word bounding boxes using PyMuPDF
+                words = page.get_text("words")
+                for idx, word in enumerate(words):
                     word_orm = Word(
                         page_id=page_orm.id,
                         word_index=idx,
-                        text=word['text'],
-                        x=word['x'],
-                        y=word['y'],
-                        width=word['width'],
-                        height=word['height'],
-                        confidence=word['confidence'],
+                        text=word[4],  # text content
+                        x=word[0],      # x coordinate
+                        y=word[1],      # y coordinate
+                        width=word[2],   # width
+                        height=word[3],  # height
+                        confidence=1.0,  # PyMuPDF doesn't provide confidence, assume 1.0
                         created_at=datetime.now()
                     )
                     session.add(word_orm)
@@ -377,49 +510,93 @@ def upload_file():
             text_path = input_path + '.json'
             with open(text_path, 'w') as f:
                 json.dump({"pages": extracted_text}, f)
-            document.ocr_status = 'done'
-            session.commit()
-            # Generate and return a session token for this document
-            session_token = get_or_create_session_token(document.id)
+            
+            # Get document info before closing session
+            document_id = document.id
+            filename = document.filename
+            original_filename = document.original_filename
+            
+            session.close()
+            
             return jsonify({
-                'document_id': document.id,
-                'filename': unique_filename,
-                'num_pages': num_pages,
-                'ocr_pages': ocr_pages,
-                'session_token': session_token
+                'message': 'File uploaded successfully',
+                'document_id': document_id,
+                'filename': filename,
+                'original_filename': original_filename,
+                'num_pages': num_pages
             })
         else:
-            return jsonify({'error': 'Invalid file type'}), 400
+            session.close()
+            return jsonify({'error': 'Invalid file type. Only PDF files are allowed.'}), 400
     except Exception as e:
-        logger.error(f"Upload error: {str(e)}")
-        session.rollback()
-        return jsonify({'error': str(e)}), 500
-    finally:
         session.close()
+        logger.error(f"Error uploading file: {e}")
+        return jsonify({'error': 'Failed to upload file'}), 500
 
+# Update PDF serving to require authentication and ownership
 @app.route('/api/pdf/<filename>', methods=['GET', 'OPTIONS'])
 def get_pdf(filename):
     if request.method == 'OPTIONS':
-        # Handle preflight request
+        # Handle preflight request without authentication
         response = jsonify({})
         response.headers['Access-Control-Allow-Origin'] = 'http://localhost:5173'
         response.headers['Access-Control-Allow-Credentials'] = 'true'
-        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Range, If-Range'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS, HEAD'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Range, If-Range, Authorization'
         return response
+    
+    # For actual requests, require authentication
+    try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({'error': 'Authentication required'}), 401
+    except Exception as e:
+        logger.error(f"Authentication error: {str(e)}")
+        return jsonify({'error': 'Authentication failed'}), 401
     
     logger.debug("=== GET PDF REQUEST ===")
     logger.debug(f"Requested filename: {filename}")
     logger.debug(f"Request headers: {dict(request.headers)}")
+    logger.debug(f"User ID: {current_user.id}")
     
     try:
+        # Verify user owns this document
+        session = get_db_session()
+        document = session.query(Document).filter_by(
+            filename=filename,
+            user_id=current_user.id
+        ).first()
+        session.close()
+        
+        if not document:
+            logger.error(f"Document not found or access denied for user {current_user.id}, filename: {filename}")
+            return jsonify({'error': 'Document not found or access denied'}), 404
+        
         filepath = os.path.join(UPLOAD_FOLDER, secure_filename(filename))
         logger.debug(f"Serving file from: {filepath}")
         
         # Check if file exists
         if not os.path.exists(filepath):
             logger.error(f"File not found: {filepath}")
+            # Check if there are similar files in the uploads directory
+            upload_dir = os.listdir(UPLOAD_FOLDER)
+            similar_files = [f for f in upload_dir if f.endswith('.pdf') and filename.split('_', 1)[1] in f]
+            if similar_files:
+                logger.warning(f"Found similar files: {similar_files}")
+                logger.warning(f"Database record points to non-existent file: {filename}")
+                logger.warning(f"Consider updating database record to point to existing file")
             return jsonify({'error': 'File not found'}), 404
+        
+        # Handle HEAD requests (for testing accessibility)
+        if request.method == 'HEAD':
+            response = jsonify({})
+            response.headers['Content-Type'] = 'application/pdf'
+            response.headers['Content-Length'] = str(os.path.getsize(filepath))
+            response.headers['Access-Control-Allow-Origin'] = 'http://localhost:5173'
+            response.headers['Access-Control-Allow-Credentials'] = 'true'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS, HEAD'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Range, If-Range, Authorization'
+            return response
         
         # Handle Range requests properly
         file_size = os.path.getsize(filepath)
@@ -456,17 +633,56 @@ def get_pdf(filename):
         # Add CORS headers
         response.headers['Access-Control-Allow-Origin'] = 'http://localhost:5173'
         response.headers['Access-Control-Allow-Credentials'] = 'true'
-        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Range, If-Range'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS, HEAD'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Range, If-Range, Authorization'
         response.headers['Accept-Ranges'] = 'bytes'
         
+        logger.debug(f"Successfully serving PDF: {filename}")
         return response
     except Exception as e:
         logger.error(f"Error serving file: {str(e)}")
-        return jsonify({'error': str(e)}), 404
+        return jsonify({'error': str(e)}), 500
 
+# Utility endpoint to fix database records pointing to missing files
+@app.route('/api/admin/fix-missing-files', methods=['POST'])
+def fix_missing_files():
+    """Utility endpoint to fix database records that point to missing files."""
+    try:
+        session = get_db_session()
+        documents = session.query(Document).all()
+        fixed_count = 0
+        
+        for doc in documents:
+            filepath = os.path.join(UPLOAD_FOLDER, secure_filename(doc.filename))
+            if not os.path.exists(filepath):
+                # Look for similar files
+                upload_dir = os.listdir(UPLOAD_FOLDER)
+                similar_files = [f for f in upload_dir if f.endswith('.pdf') and doc.filename.split('_', 1)[1] in f]
+                
+                if similar_files:
+                    # Use the first similar file found
+                    new_filename = similar_files[0]
+                    logger.info(f"Fixing document {doc.document_id}: {doc.filename} -> {new_filename}")
+                    doc.filename = new_filename
+                    fixed_count += 1
+                else:
+                    logger.warning(f"No similar file found for document {doc.document_id}: {doc.filename}")
+        
+        session.commit()
+        session.close()
+        
+        return jsonify({
+            'message': f'Fixed {fixed_count} database records',
+            'fixed_count': fixed_count
+        })
+    except Exception as e:
+        logger.error(f"Error fixing missing files: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+# Update chat endpoint to require authentication
 @chat_api.post('/chat', tags=[chat_tag], responses={200: ChatResponseSchema})
-def chat():
+@token_required
+def chat(current_user):
     """Chat with Gemini about the PDF content."""
     try:
         data = request.get_json()
@@ -485,12 +701,15 @@ def chat():
         if not document_id or not message:
             return jsonify({'error': 'Missing document_id or message'}), 400
         
-        # Get document from database to find the filename
+        # Get document from database and verify ownership
         session = get_db_session()
-        document = session.query(Document).get(document_id)
+        document = session.query(Document).filter_by(
+            id=document_id,
+            user_id=current_user.id
+        ).first()
         if not document:
             session.close()
-            return jsonify({'error': 'Document not found'}), 404
+            return jsonify({'error': 'Document not found or access denied'}), 404
         
         # Load extracted text using the document filename
         text_path = os.path.join(app.config['UPLOAD_FOLDER'], document.filename + '.json')
@@ -611,16 +830,17 @@ For every claim or point in your answer, please provide the exact supporting sen
 app.register_api(chat_api)
 
 # Refactor highlights and chat endpoints to use session_token and document_id
-@app.route('/api/highlights', methods=['POST'])
-@session_token_required
-def create_highlight(document_id):
+@app.route('/api/highlights/<int:document_id>', methods=['POST'])
+@token_required
+@document_owner_required
+def create_highlight(current_user, document):
     session = get_db_session()
     data = request.get_json()
     page_id = data.get('page_id')
     word_ids = data.get('word_ids')
     color = data.get('color', '#ffe066')
     highlight = Highlight(
-        document_id=document_id,
+        document_id=document.id,
         page_id=page_id,
         word_ids=word_ids,
         color=color,
@@ -631,12 +851,13 @@ def create_highlight(document_id):
     session.close()
     return jsonify({'message': 'Highlight created'})
 
-@app.route('/api/highlights', methods=['GET'])
-@session_token_required
-def get_highlights(document_id):
+@app.route('/api/highlights/<int:document_id>', methods=['GET'])
+@token_required
+@document_owner_required
+def get_highlights(current_user, document):
     session = get_db_session()
     page_id = request.args.get('page_id')
-    q = session.query(Highlight).filter_by(document_id=document_id)
+    q = session.query(Highlight).filter_by(document_id=document.id)
     if page_id:
         q = q.filter_by(page_id=page_id)
     highlights = q.all()
@@ -645,93 +866,207 @@ def get_highlights(document_id):
         {'id': h.id, 'document_id': h.document_id, 'page_id': h.page_id, 'word_ids': h.word_ids, 'color': h.color, 'created_at': h.created_at.isoformat()} for h in highlights
     ]})
 
+# Update chat sessions endpoints to require authentication
 @app.route('/api/chat_sessions', methods=['POST'])
-def create_chat_session():
-    session = get_db_session()
-    data = request.get_json()
-    document_id = data.get('document_id')
-    
-    if not document_id:
-        return jsonify({'error': 'document_id is required'}), 400
-    
-    chat_session = ChatSession(
-        document_id=document_id,
-        created_at=datetime.now()
-    )
-    session.add(chat_session)
-    session.commit()
-    session_id = chat_session.id
-    session.close()
-    return jsonify({'id': session_id, 'message': 'Chat session created'})
+@token_required
+def create_chat_session(current_user):
+    """Create a new chat session."""
+    try:
+        data = request.get_json()
+        document_id = data.get('document_id')
+        
+        if not document_id:
+            return jsonify({'error': 'Document ID is required'}), 400
+        
+        session = get_db_session()
+        
+        # Verify user owns the document
+        document = session.query(Document).filter_by(
+            id=document_id,
+            user_id=current_user.id
+        ).first()
+        
+        if not document:
+            session.close()
+            return jsonify({'error': 'Document not found or access denied'}), 404
+        
+        chat_session = ChatSession(
+            user_id=current_user.id,
+            document_id=document_id
+        )
+        
+        session.add(chat_session)
+        session.commit()
+        session.close()
+        
+        return jsonify({
+            'message': 'Chat session created successfully',
+            'chat_session_id': chat_session.id
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"Error creating chat session: {e}")
+        return jsonify({'error': 'Failed to create chat session'}), 500
 
 @app.route('/api/chat_sessions', methods=['GET'])
-def get_chat_sessions():
-    session = get_db_session()
-    document_id = request.args.get('document_id')
-    
-    if not document_id:
-        return jsonify({'error': 'document_id is required'}), 400
-    
-    chat_sessions = session.query(ChatSession).filter_by(document_id=document_id).order_by(ChatSession.created_at.desc()).all()
-    session.close()
-    return jsonify([
-        {'id': cs.id, 'document_id': cs.document_id, 'created_at': cs.created_at.isoformat()} for cs in chat_sessions
-    ])
-
-@app.route('/api/chat_messages', methods=['POST'])
-def create_chat_message():
-    session = get_db_session()
-    data = request.get_json()
-    chat_session_id = data.get('chat_session_id')
-    sender = data.get('sender')
-    message = data.get('message')
-    reference_word_ids = data.get('reference_word_ids')
-    reference_page = data.get('reference_page')
-    reference_quote = data.get('reference_quote')
-    page_range = data.get('page_range')
-    references = data.get('references')
-    
-    if not chat_session_id or not sender or not message:
-        return jsonify({'error': 'chat_session_id, sender, and message are required'}), 400
-    
-    chat_message = ChatMessage(
-        chat_session_id=chat_session_id,
-        sender=sender,
-        message=message,
-        created_at=datetime.now(),
-        reference_word_ids=reference_word_ids,
-        reference_page=reference_page,
-        reference_quote=reference_quote,
-        page_range=page_range,
-        references=references
-    )
-    session.add(chat_message)
-    session.commit()
-    session.close()
-    return jsonify({'message': 'Chat message created'})
-
-@app.route('/api/chat_messages', methods=['GET'])
-def get_chat_messages():
-    session = get_db_session()
-    chat_session_id = request.args.get('chat_session_id')
-    
-    if not chat_session_id:
-        return jsonify({'error': 'chat_session_id is required'}), 400
-    
-    q = session.query(ChatMessage)
-    q = q.filter_by(chat_session_id=chat_session_id)
-    messages = q.order_by(ChatMessage.created_at).all()
-    session.close()
-    return jsonify([
-        {'id': m.id, 'chat_session_id': m.chat_session_id, 'sender': m.sender, 'message': m.message, 'created_at': m.created_at.isoformat(), 'reference_word_ids': m.reference_word_ids, 'reference_page': m.reference_page, 'reference_quote': m.reference_quote, 'page_range': m.page_range, 'references': m.references} for m in messages
-    ])
-
-@app.route('/api/documents', methods=['GET'])
-def list_documents():
-    """List all uploaded documents with their metadata."""
+@token_required
+def get_chat_sessions(current_user):
+    """Get all chat sessions for the current user."""
     try:
         session = get_db_session()
-        documents = session.query(Document).order_by(Document.created_at.desc()).all()
+        chat_sessions = session.query(ChatSession).filter_by(user_id=current_user.id).all()
+        
+        sessions_data = []
+        for cs in chat_sessions:
+            sessions_data.append({
+                'id': cs.id,
+                'document_id': cs.document_id,
+                'created_at': cs.created_at.isoformat() if cs.created_at else None
+            })
+        
+        session.close()
+        return jsonify(sessions_data)
+        
+    except Exception as e:
+        logger.error(f"Error getting chat sessions: {e}")
+        return jsonify({'error': 'Failed to get chat sessions'}), 500
+
+# Update chat messages endpoints to require authentication
+@app.route('/api/chat_messages', methods=['POST'])
+@token_required
+def create_chat_message(current_user):
+    """Create a new chat message."""
+    try:
+        data = request.get_json()
+        chat_session_id = data.get('chat_session_id')
+        message = data.get('message')
+        sender = data.get('sender', 'user')
+        reference_word_ids = data.get('reference_word_ids', [])
+        reference_page = data.get('reference_page')
+        reference_quote = data.get('reference_quote')
+        page_range = data.get('page_range', [])
+        references = data.get('references', [])
+        
+        if not chat_session_id or not message:
+            return jsonify({'error': 'Chat session ID and message are required'}), 400
+        
+        session = get_db_session()
+        
+        # Verify user owns the chat session
+        chat_session = session.query(ChatSession).filter_by(
+            id=chat_session_id,
+            user_id=current_user.id
+        ).first()
+        
+        if not chat_session:
+            session.close()
+            return jsonify({'error': 'Chat session not found or access denied'}), 404
+        
+        chat_message = ChatMessage(
+            chat_session_id=chat_session_id,
+            sender=sender,
+            message=message,
+            reference_word_ids=reference_word_ids,
+            reference_page=reference_page,
+            reference_quote=reference_quote,
+            page_range=page_range,
+            references=references
+        )
+        
+        session.add(chat_message)
+        session.commit()
+        
+        # Get the ID before closing the session
+        chat_message_id = chat_message.id
+        session.close()
+        
+        return jsonify({
+            'message': 'Chat message created successfully',
+            'chat_message_id': chat_message_id
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"Error creating chat message: {e}")
+        return jsonify({'error': 'Failed to create chat message'}), 500
+
+@app.route('/api/chat_messages', methods=['GET'])
+@token_required
+def get_chat_messages(current_user):
+    """Get chat messages for a specific chat session."""
+    try:
+        chat_session_id = request.args.get('chat_session_id')
+        
+        if not chat_session_id:
+            return jsonify({'error': 'Chat session ID is required'}), 400
+        
+        session = get_db_session()
+        
+        # Verify user owns the chat session
+        chat_session = session.query(ChatSession).filter_by(
+            id=chat_session_id,
+            user_id=current_user.id
+        ).first()
+        
+        if not chat_session:
+            session.close()
+            return jsonify({'error': 'Chat session not found or access denied'}), 404
+        
+        messages = session.query(ChatMessage).filter_by(chat_session_id=chat_session_id).all()
+        
+        messages_data = []
+        for msg in messages:
+            messages_data.append({
+                'id': msg.id,
+                'sender': msg.sender,
+                'message': msg.message,
+                'created_at': msg.created_at.isoformat() if msg.created_at else None,
+                'reference_word_ids': msg.reference_word_ids,
+                'reference_page': msg.reference_page,
+                'reference_quote': msg.reference_quote,
+                'page_range': msg.page_range,
+                'references': msg.references
+            })
+        
+        session.close()
+        return jsonify(messages_data)
+        
+    except Exception as e:
+        logger.error(f"Error getting chat messages: {e}")
+        return jsonify({'error': 'Failed to get chat messages'}), 500
+
+@app.route('/api/chat/clear', methods=['POST'])
+@token_required
+def clear_chat(current_user):
+    """Clear all chat messages for the current user"""
+    try:
+        session = get_db_session()
+        
+        # Find all chat sessions for this user
+        chat_sessions = session.query(ChatSession).filter_by(user_id=current_user.id).all()
+        
+        # Delete all chat messages for these chat sessions
+        for chat_session in chat_sessions:
+            session.query(ChatMessage).filter_by(chat_session_id=chat_session.id).delete()
+        
+        # Keep the chat sessions but clear their messages
+        session.commit()
+        
+        logger.info(f"Cleared all chat messages for user {current_user.id} (kept {len(chat_sessions)} chat sessions)")
+        return jsonify({'message': 'Chat cleared successfully'}), 200
+        
+    except Exception as e:
+        logger.error(f"Error clearing chat: {str(e)}")
+        session.rollback()
+        return jsonify({'error': 'Failed to clear chat'}), 500
+
+# Update documents endpoints to require authentication
+@app.route('/api/documents', methods=['GET'])
+@token_required
+def list_documents(current_user):
+    """List all documents for the current user."""
+    try:
+        session = get_db_session()
+        documents = session.query(Document).filter_by(user_id=current_user.id).all()
         
         for doc in documents:
             # Check if file exists
@@ -749,21 +1084,17 @@ def list_documents():
         return jsonify({'error': 'Failed to list documents'}), 500
 
 @app.route('/api/documents/<int:document_id>', methods=['GET'])
-def get_document(document_id):
+@token_required
+@document_owner_required
+def get_document(current_user, document):
     """Get detailed information about a specific document."""
     try:
         session = get_db_session()
-        document = session.query(Document).get(document_id)
-        if not document:
-            return jsonify({'error': 'Document not found'}), 404
         
         # Get additional stats
-        page_count = session.query(Page).filter_by(document_id=document_id).count()
-        
-        activated_blocks = session.query(Highlight).filter_by(document_id=document_id).count()
-        
-        # Count words by joining with pages
-        sentence_count = session.query(Word).join(Page).filter(Page.document_id == document_id).count()
+        page_count = session.query(Page).filter_by(document_id=document.id).count()
+        activated_blocks = session.query(Highlight).filter_by(document_id=document.id).count()
+        sentence_count = session.query(Word).join(Page).filter(Page.document_id == document.id).count()
         
         # Check if file exists
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], document.filename)
@@ -790,14 +1121,12 @@ def get_document(document_id):
         return jsonify({'error': 'Failed to get document'}), 500
 
 @app.route('/api/documents/<int:document_id>', methods=['DELETE'])
-def delete_document(document_id):
+@token_required
+@document_owner_required
+def delete_document(current_user, document):
     """Delete a document and all its associated data."""
     try:
         session = get_db_session()
-        document = session.query(Document).get(document_id)
-        if not document:
-            return jsonify({'error': 'Document not found'}), 404
-        
         filename = document.filename
         
         # Delete from database (cascade will handle related records)
@@ -818,7 +1147,9 @@ def delete_document(document_id):
         return jsonify({'error': 'Failed to delete document'}), 500
 
 @app.route('/api/documents/<int:document_id>/rename', methods=['PUT'])
-def rename_document(document_id):
+@token_required
+@document_owner_required
+def rename_document(current_user, document):
     """Rename a document's display name."""
     try:
         data = request.get_json()
@@ -828,11 +1159,6 @@ def rename_document(document_id):
             return jsonify({'error': 'New name is required'}), 400
         
         session = get_db_session()
-        document = session.query(Document).get(document_id)
-        if not document:
-            return jsonify({'error': 'Document not found'}), 404
-        
-        # Update the original_filename (display name)
         document.original_filename = new_name.strip()
         session.commit()
         session.close()
