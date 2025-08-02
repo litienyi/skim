@@ -1,6 +1,4 @@
-import sqlite3
 import os
-from pathlib import Path
 import logging
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, ForeignKey, DateTime, Text, JSON
@@ -22,20 +20,9 @@ class User(Base):
     email = Column(String, unique=True, nullable=False)
     password_hash = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-    sessions = relationship('Session', back_populates='user')
     documents = relationship('Document', back_populates='user')
     highlights = relationship('Highlight', back_populates='user')
     chat_sessions = relationship('ChatSession', back_populates='user')
-
-class Session(Base):
-    __tablename__ = 'sessions'
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=True)
-    document_id = Column(Integer, ForeignKey('documents.id'), nullable=True)  # Added for per-document session
-    session_token = Column(String, unique=True, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    expires_at = Column(DateTime)
-    user = relationship('User', back_populates='sessions')
 
 class Document(Base):
     __tablename__ = 'documents'
@@ -45,8 +32,7 @@ class Document(Base):
     original_filename = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
     num_pages = Column(Integer)
-    ocr_status = Column(String)
-    meta = Column(JSON)  # Renamed from 'metadata' to 'meta'
+    meta = Column(JSON)
     user = relationship('User', back_populates='documents')
     pages = relationship('Page', back_populates='document')
     highlights = relationship('Highlight', back_populates='document')
@@ -61,7 +47,6 @@ class Document(Base):
             'original_filename': self.original_filename,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'num_pages': self.num_pages,
-            'ocr_status': self.ocr_status,
             'meta': self.meta,
             'file_exists': getattr(self, 'file_exists', None),
             'file_size': getattr(self, 'file_size', None)
@@ -72,8 +57,7 @@ class Page(Base):
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey('documents.id'))
     page_number = Column(Integer, nullable=False)
-    image_path = Column(String)
-    ocr_text = Column(Text)
+    text_content = Column(Text)  # Renamed from ocr_text for clarity
     created_at = Column(DateTime, default=datetime.utcnow)
     document = relationship('Document', back_populates='pages')
     words = relationship('Word', back_populates='page')
@@ -129,16 +113,6 @@ class ChatMessage(Base):
     page_range = Column(JSON)  # Store the page range used for this message
     references = Column(JSON)  # Store all references as JSON array
     chat_session = relationship('ChatSession', back_populates='messages')
-
-def get_db_connection():
-    """Create a database connection with proper timeout and isolation level."""
-    db_path = Path(__file__).parent / 'pdf_layout.db'
-    conn = sqlite3.connect(str(db_path), timeout=30.0)  # 30 second timeout
-    conn.row_factory = sqlite3.Row
-    # Set isolation level to handle concurrent access better
-    conn.isolation_level = 'IMMEDIATE'
-    return conn
-
 
 def init_db():
     """Initialize the database with required tables."""

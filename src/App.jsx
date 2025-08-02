@@ -7,6 +7,7 @@ import './App.css'
 import { useState, useRef, useEffect } from 'react'
 import * as fuzz from 'fuzzball'
 import ReactMarkdown from 'react-markdown'
+import Auth from './Auth'
 
 pdfjs.GlobalWorkerOptions.workerSrc = '/node_modules/pdfjs-dist/build/pdf.worker.min.mjs'
 
@@ -30,7 +31,22 @@ function levenshtein(a, b) {
   return matrix[a.length][b.length];
 }
 
+// Utility function to normalize text for comparison
+function normalize(str) {
+  return str
+    .replace(/[""'':,;\-]/g, '')  // Remove quotes, colons, semicolons, hyphens
+    .replace(/[^\w\s]/g, '')      // Remove all non-word, non-space characters
+    .replace(/\s+/g, ' ')         // Normalize whitespace
+    .toLowerCase()
+    .trim();
+}
+
 function App() {
+  // Authentication state
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [token, setToken] = useState(localStorage.getItem('token'));
+  const [user, setUser] = useState(JSON.parse(localStorage.getItem('user') || 'null'));
+
   const [numPages, setNumPages] = useState(null)
   const [file, setFile] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -61,7 +77,6 @@ function App() {
   const [showLandingModal, setShowLandingModal] = useState(true)
   const [existingDocuments, setExistingDocuments] = useState([])
   const [loadingDocuments, setLoadingDocuments] = useState(false)
-  const [sessionToken, setSessionToken] = useState(localStorage.getItem('sessionToken'))
   const [showExistingDocuments, setShowExistingDocuments] = useState(false)
   const [editingDocument, setEditingDocument] = useState(null)
   const [newDocumentName, setNewDocumentName] = useState('')
@@ -76,7 +91,53 @@ function App() {
   
   // Add state for tracking last used page range for inheritance
   const [lastUsedPageRange, setLastUsedPageRange] = useState(null)
-  
+
+  // Add state for highlighting status
+  const [highlightingStatus, setHighlightingStatus] = useState({}); // { [pageNum]: 'success' | 'failed' | 'retrying' }
+
+  // Check authentication on mount
+  useEffect(() => {
+    if (token) {
+      setIsAuthenticated(true);
+    }
+  }, [token]);
+
+  // Authentication handlers
+  const handleLogin = (newToken, userData) => {
+    setToken(newToken);
+    setUser(userData);
+    setIsAuthenticated(true);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    setToken(null);
+    setUser(null);
+    setIsAuthenticated(false);
+    // Reset all app state
+    setFile(null);
+    setPdfInfo(null);
+    setChatMessages([]);
+    setExistingDocuments([]);
+    // Clean up blob URL if it exists
+    if (currentBlobUrl) {
+      cleanupBlobUrl(currentBlobUrl);
+      setCurrentBlobUrl(null);
+    }
+  };
+
+  // Helper function to add auth headers to API calls
+  const getAuthHeaders = () => {
+    const headers = {
+      'Content-Type': 'application/json',
+    };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    return headers;
+  };
+
   function onDocumentLoadSuccess({ numPages }) {
     setNumPages(numPages)
     setPageRange([1, numPages])
@@ -84,13 +145,72 @@ function App() {
     setParsedPageRanges([])
     // Initialize last used page range to full range
     setLastUsedPageRange([1, numPages])
+    // Clear any previous errors
+    setError(null)
+  }
+
+  // Handle PDF loading errors
+  function onDocumentLoadError(error) {
+    console.error('PDF load error:', error)
+    
+    // Check if it's an authentication error
+    if (error.message && error.message.includes('401')) {
+      setError('Authentication failed. Please log in again.')
+    } else if (error.message && error.message.includes('404')) {
+      setError('PDF file not found. The file may have been deleted.')
+    } else {
+      setError(`Failed to load PDF: ${error.message}`)
+    }
+    
+    // Reset file state to allow retry
+    setFile(null)
+    setNumPages(null)
+    
+    // Clean up blob URL if it exists
+    if (currentBlobUrl) {
+      cleanupBlobUrl(currentBlobUrl)
+      setCurrentBlobUrl(null)
+    }
+  }
+
+  // Retry loading the current document
+  async function retryLoadDocument() {
+    if (pdfInfo && pdfInfo.document_id) {
+      setError(null)
+      await loadExistingDocument(pdfInfo.document_id)
+    }
+  }
+
+  // Retry PDF loading with exponential backoff
+  async function retryPdfLoad(documentId, attempt = 1) {
+    const maxAttempts = 3
+    const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000) // 1s, 2s, 4s
+    
+    console.log(`[PDF Load] Retry attempt ${attempt}/${maxAttempts} for document ${documentId}`)
+    
+    setTimeout(async () => {
+      if (attempt >= maxAttempts) {
+        console.log('[PDF Load] Max retry attempts reached')
+        setError('Failed to load PDF after multiple attempts. Please try again later.')
+        return
+      }
+      
+      try {
+        await loadExistingDocument(documentId)
+      } catch (error) {
+        console.warn(`[PDF Load] Retry ${attempt} failed:`, error)
+        retryPdfLoad(documentId, attempt + 1)
+      }
+    }, delay)
   }
 
   // Load existing documents from backend
   async function loadExistingDocuments() {
     setLoadingDocuments(true)
     try {
-      const response = await fetch(`${API_URL}/documents`)
+      const response = await fetch(`${API_URL}/documents`, {
+        headers: getAuthHeaders()
+      })
       if (response.ok) {
         const documents = await response.json()
         setExistingDocuments(documents)
@@ -106,37 +226,96 @@ function App() {
 
   // Load an existing document
   async function loadExistingDocument(documentId) {
+    console.log('=== Loading existing document ===')
+    console.log('Document ID:', documentId)
+    console.log('API URL:', API_URL)
+    
     setLoading(true)
     setError(null)
     try {
-      console.log('Loading document with ID:', documentId)
+      console.log('Fetching document data...')
+      const response = await fetch(`${API_URL}/documents/${documentId}`, {
+        headers: getAuthHeaders()
+      })
       
-      const response = await fetch(`${API_URL}/documents/${documentId}`)
-      if (!response.ok) throw new Error('Failed to load document')
+      console.log('Document response status:', response.status)
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error('Document fetch failed:', errorText)
+        throw new Error(`Failed to load document: ${response.status} ${errorText}`)
+      }
+      
       const documentData = await response.json()
       console.log('Document data loaded:', documentData)
       
-      // Create a file object from the document data
-      console.log('Fetching PDF file:', `${API_URL}/pdf/${documentData.filename}`)
-      
-      // Try a different approach - create a direct URL to the PDF
+      // Create a direct URL to the PDF with proper headers
       const pdfUrl = `${API_URL}/pdf/${documentData.filename}`
-      console.log('Using direct PDF URL:', pdfUrl)
+      console.log('PDF URL:', pdfUrl)
       
-      // For react-pdf, we can pass the URL directly
+      // Fetch the PDF with authentication headers and create a blob URL
+      console.log('Fetching PDF with authentication...')
+      const pdfResponse = await fetch(pdfUrl, {
+        headers: getAuthHeaders()
+      })
+      
+      console.log('PDF response status:', pdfResponse.status)
+      if (!pdfResponse.ok) {
+        const errorText = await pdfResponse.text()
+        console.error('PDF fetch failed:', errorText)
+        
+        // Provide specific error messages for common issues
+        if (pdfResponse.status === 401) {
+          throw new Error('Authentication failed. Please log in again.')
+        } else if (pdfResponse.status === 404) {
+          throw new Error('PDF file not found. The file may have been deleted.')
+        } else if (pdfResponse.status === 0) {
+          throw new Error('Network error. Please check your connection and try again.')
+        } else {
+          throw new Error(`PDF file not accessible: ${pdfResponse.status} ${errorText}`)
+        }
+      }
+      
+      // Create blob URL from the PDF response
+      const pdfBlob = await pdfResponse.blob()
+      const blobUrl = URL.createObjectURL(pdfBlob)
+      console.log('Created blob URL for PDF:', blobUrl)
+      
+      // Clean up previous blob URL if it exists
+      if (currentBlobUrl) {
+        cleanupBlobUrl(currentBlobUrl)
+      }
+      
+      console.log('PDF is accessible, setting up viewer...')
+      // Set the PDF info and blob URL
       setPdfInfo(documentData)
-      setFile(pdfUrl)
+      setFile(blobUrl) // Use blob URL instead of direct URL
+      setCurrentBlobUrl(blobUrl) // Track the blob URL for cleanup
       setNumPages(documentData.num_pages)
       setPageRange([1, documentData.num_pages])
       setPageRangeInput('')
       setParsedPageRanges([])
+      setLastUsedPageRange([1, documentData.num_pages]) // Initialize last used range
       setShowLandingModal(false)
       
       // Initialize chat session and load existing chat messages
+      console.log('Loading chat history...')
       await loadChatHistory(documentData.document_id)
+      
+      console.log('Document loaded successfully')
     } catch (e) {
-      setError('Error loading document')
       console.error('Error loading document:', e)
+      
+      // Provide user-friendly error messages
+      let errorMessage = e.message
+      if (e.message.includes('Failed to fetch')) {
+        errorMessage = 'Network error. Please check your connection and try again.'
+      } else if (e.message.includes('CORS')) {
+        errorMessage = 'Browser security error. Please refresh the page and try again.'
+      } else if (e.message.includes('Authentication failed')) {
+        errorMessage = 'Session expired. Please log in again.'
+      }
+      
+      setError(`Error loading document: ${errorMessage}`)
     } finally {
       setLoading(false)
     }
@@ -155,7 +334,9 @@ function App() {
   async function getOrCreateChatSession(documentId) {
     try {
       // First try to get existing chat sessions
-      const response = await fetch(`${API_URL}/chat_sessions?document_id=${documentId}`)
+      const response = await fetch(`${API_URL}/chat_sessions`, {
+        headers: getAuthHeaders()
+      })
       if (response.ok) {
         const sessions = await response.json()
         if (sessions && sessions.length > 0) {
@@ -169,14 +350,14 @@ function App() {
       // Create new session if none exists
       const createResponse = await fetch(`${API_URL}/chat_sessions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ document_id: documentId })
       })
       
       if (createResponse.ok) {
         const newSession = await createResponse.json()
-        setCurrentChatSessionId(newSession.id)
-        return newSession.id
+        setCurrentChatSessionId(newSession.chat_session_id)
+        return newSession.chat_session_id
       }
     } catch (error) {
       console.error('Error managing chat session:', error)
@@ -191,7 +372,7 @@ function App() {
     try {
       await fetch(`${API_URL}/chat_messages`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           chat_session_id: currentChatSessionId,
           sender: sender,
@@ -216,7 +397,9 @@ function App() {
       if (!sessionId) return
       
       // Load messages for this session
-      const response = await fetch(`${API_URL}/chat_messages?chat_session_id=${sessionId}`)
+      const response = await fetch(`${API_URL}/chat_messages?chat_session_id=${sessionId}`, {
+        headers: getAuthHeaders()
+      })
       if (response.ok) {
         const messages = await response.json()
         setChatMessages(messages.map(msg => ({
@@ -277,7 +460,7 @@ function App() {
     try {
       const response = await fetch(`${API_URL}/documents/${documentId}/rename`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ new_name: newName.trim() })
       })
       
@@ -302,7 +485,8 @@ function App() {
   async function handleDeleteDocument(documentId) {
     try {
       const response = await fetch(`${API_URL}/documents/${documentId}`, {
-        method: 'DELETE'
+        method: 'DELETE',
+        headers: getAuthHeaders()
       })
       
       if (response.ok) {
@@ -408,8 +592,16 @@ function App() {
     try {
       const formData = new FormData()
       formData.append('file', file)
+      
+      // Create headers without Content-Type for FormData
+      const headers = {}
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+      
       const uploadResponse = await fetch(`${API_URL}/upload`, {
         method: 'POST',
+        headers: headers,
         body: formData
       })
       if (!uploadResponse.ok) throw new Error('Failed to upload file')
@@ -529,7 +721,7 @@ function App() {
     try {
       const response = await fetch(`${API_URL}/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(requestBody)
       })
       
@@ -736,18 +928,63 @@ function App() {
   // Add clear chat function
   async function clearChat() {
     if (window.confirm('Are you sure you want to clear the chat history? This action cannot be undone.')) {
-      setChatMessages([])
-      setHighlightRefs([])
-      setCurrentPage(null)
-      setHighlightedQuote(null)
-      setHighlightedFragmentIndices({})
-      setMatchQuality({})
+      try {
+        console.log('[Clear Chat] Starting chat clear...');
+        
+        // Call backend to clear chat messages from database
+        const response = await fetch('/api/chat/clear', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          }
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const result = await response.json();
+        console.log('[Clear Chat] Backend response:', result);
+        
+        // Clear UI state
+        setChatMessages([]);
+        setHighlightRefs([]);
+        setCurrentPage(null);
+        setHighlightedQuote(null);
+        setHighlightedFragmentIndices({});
+        setMatchQuality({});
+        setInputMessage('');
+        setError(null);
+        
+        // Clean up blob URL if exists
+        if (currentBlobUrl) {
+          cleanupBlobUrl();
+          setCurrentBlobUrl(null);
+        }
+        
       // Reset page range to last used or full range
       if (lastUsedPageRange) {
-        setPageRange(lastUsedPageRange)
-        setPageRangeInput(`${lastUsedPageRange[0]}-${lastUsedPageRange[1]}`)
+          setPageRange(lastUsedPageRange);
+          setPageRangeInput(`${lastUsedPageRange[0]}-${lastUsedPageRange[1]}`);
         setParsedPageRanges(lastUsedPageRange[0] === lastUsedPageRange[1] ? [lastUsedPageRange[0]] : 
-                          Array.from({length: lastUsedPageRange[1] - lastUsedPageRange[0] + 1}, (_, i) => lastUsedPageRange[0] + i))
+                            Array.from({length: lastUsedPageRange[1] - lastUsedPageRange[0] + 1}, (_, i) => lastUsedPageRange[0] + i));
+        }
+        
+        console.log('[Clear Chat] Chat cleared successfully');
+        
+      } catch (error) {
+        console.error('[Clear Chat] Error clearing chat:', error);
+        setError('Failed to clear chat. Please try again.');
+        
+        // Still clear UI state even if backend fails
+        setChatMessages([]);
+        setHighlightRefs([]);
+        setCurrentPage(null);
+        setHighlightedQuote(null);
+        setHighlightedFragmentIndices({});
+        setMatchQuality({});
+        setInputMessage('');
       }
     }
   }
@@ -767,9 +1004,34 @@ function App() {
     scrollToBottom()
   }, [chatMessages])
 
+  // Add state for tracking blob URLs to clean up
+  const [currentBlobUrl, setCurrentBlobUrl] = useState(null)
+
+  // Cleanup function for blob URLs
+  const cleanupBlobUrl = (url) => {
+    if (url && url.startsWith('blob:')) {
+      URL.revokeObjectURL(url)
+      console.log('Cleaned up blob URL:', url)
+    }
+  }
+
+  // Cleanup effect
+  useEffect(() => {
+    return () => {
+      // Cleanup blob URL when component unmounts
+      if (currentBlobUrl) {
+        cleanupBlobUrl(currentBlobUrl)
+      }
+    }
+  }, [currentBlobUrl])
+
   // Enhanced reference click handler
   function handleReferenceClick(ref) {
-    console.log('[Highlight DEBUG] handleReferenceClick called with', ref);
+    console.log('[Highlight] Reference clicked:', ref);
+    
+    // Clear previous highlighting status
+    setHighlightingStatus({});
+    
     // Always update state to trigger re-render and highlighting
     const pageIndex = ref.page;
     setCurrentPage(Number(pageIndex));
@@ -787,141 +1049,298 @@ function App() {
       }, 100);
       }
 
-  // Enhanced fuzzy matching function with word-to-fragment mapping
-  function findBestMatchInText(quote, pageText) { // pageText is now expected to be normalized
-    if (!quote || !pageText) {
-      return null;
-    }
-
-    const normQuote = normalize(quote); // Normalize quote again just in case
-    const normPageText = pageText; // pageText is already normalized
-
-    console.log('[Match Debug] Looking for quote:', normQuote);
-    console.log('[Match Debug] In page text (first 200 chars):', normPageText.substring(0, 200));
-
-    // If exact match exists, return it
-    const exactIndex = normPageText.indexOf(normQuote);
-    if (exactIndex !== -1) {
-      console.log('[Match Debug] Found exact match at index:', exactIndex);
-      return {
-        start: exactIndex,
-        end: exactIndex + normQuote.length,
-        score: 100,
-        type: 'exact',
-        matchedText: normQuote
-      };
-    }
-
-    // Sliding window approach for fuzzy matching using character-based windows
-    const quoteLength = normQuote.length;
-    const minWindow = Math.max(10, quoteLength - 20); // Minimum 10 chars, or quote length - 20
-    const maxWindow = Math.min(normPageText.length, quoteLength + 20); // Maximum quote length + 20
-
-    console.log('[Match Debug] Quote length:', quoteLength);
-    console.log('[Match Debug] Window range:', minWindow, 'to', maxWindow);
-
-    let bestMatch = null;
-    let bestScore = 0;
-
-    // Try different window sizes around the quote length
-    for (let windowSize = minWindow; windowSize <= maxWindow; windowSize++) {
-      for (let i = 0; i <= normPageText.length - windowSize; i++) {
-        const window = normPageText.substring(i, i + windowSize);
-        
-        // Use fuzzball's ratio for similarity
-        const score = fuzz.ratio(window, normQuote);
-        
-        if (score > bestScore && score > 70) { // Minimum threshold
-          bestScore = score;
-          bestMatch = {
-            start: i,
-            end: i + windowSize,
-            score: score,
-            type: 'fuzzy',
-            matchedText: window
-          };
-          console.log('[Match Debug] New best match:', { score, window, start: i, end: i + windowSize });
-        }
-      }
-    }
-
-    if (bestMatch) {
-      console.log('[Match Debug] Final best match:', bestMatch);
-    } else {
-      console.log('[Match Debug] No match found');
-    }
-
-    return bestMatch;
-  }
-
-  // Enhanced main highlighting function
+  // State-of-the-art fast fuzzy matching for real-time highlighting
   function highlightTextInPage(pageNum, quote) {
-    console.log('[Highlight DEBUG] highlightTextInPage called with', { pageNum, quote });
-    setLastHighlightCall({ pageNum, quote, ts: Date.now() });
+    console.log('[Highlight] Starting fast fuzzy matching for page', pageNum, 'quote:', quote);
     
     // Get the page text from the fragments
     const fragments = pageTextFragments.current[pageNum];
     
     if (!fragments || fragments.length === 0) {
-      console.warn('[Highlight Debug] No fragments found for page', pageNum);
+      console.log('[Highlight] No fragments found for page', pageNum);
       setHighlightedFragmentIndices(prev => ({ ...prev, [pageNum]: new Set() }));
       setMatchQuality(prev => ({ 
         ...prev, 
         [pageNum]: { score: 0, strategy: 'none', confidence: 'low' } 
       }));
-      setHighlightWarning({
-        pageNum,
-        quote,
-        joined: '(No fragments found)'
-      });
+      setHighlightingStatus(prev => ({ ...prev, [pageNum]: 'failed' }));
       return;
     }
 
-    // Build normalized page text and create character-to-fragment mapping
-    let normalizedPageText = '';
-    const normalizedCharToFragmentIndexMap = [];
+    // Fast normalization (preserve structure)
+    const normalizeText = (text) => {
+      return text
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .toLowerCase()
+        .trim();
+    };
+    
+    const normQuote = normalizeText(quote);
+    console.log('[Highlight] Normalized quote:', normQuote);
+    
+    // Build the full page text
+    let fullText = '';
+    const fragmentPositions = [];
     
     for (let i = 0; i < fragments.length; i++) {
       const fragment = fragments[i];
-      const originalFragmentStr = fragment?.str || '';
-      const normalizedFragmentStr = normalize(originalFragmentStr);
+      const fragmentText = fragment?.str || '';
+      fragmentPositions.push(fullText.length);
+      fullText += fragmentText;
+      if (i < fragments.length - 1) fullText += ' ';
+    }
+    
+    const normFullText = normalizeText(fullText);
+    console.log('[Highlight] Full text length:', normFullText.length);
+    
+    // Fast fuzzy matching algorithms
+    
+    // 1. Rolling Hash for fast substring comparison (O(n))
+    function rollingHash(text, start, length) {
+      let hash = 0;
+      const prime = 31;
+      const mod = 1e9 + 7;
       
-      // Add the normalized fragment text
-      normalizedPageText += normalizedFragmentStr;
+      for (let i = 0; i < length; i++) {
+        hash = (hash * prime + text.charCodeAt(start + i)) % mod;
+      }
+      return hash;
+    }
+    
+    // 2. Fast similarity using character frequency (O(n))
+    function fastSimilarity(str1, str2) {
+      if (str1.length === 0 || str2.length === 0) return 0;
       
-      // Map each character in this fragment to this fragment index
-      for (let k = 0; k < normalizedFragmentStr.length; k++) {
-        normalizedCharToFragmentIndexMap.push(i);
+      // Count character frequencies
+      const freq1 = new Array(128).fill(0);
+      const freq2 = new Array(128).fill(0);
+      
+      for (const char of str1) freq1[char.charCodeAt(0)]++;
+      for (const char of str2) freq2[char.charCodeAt(0)]++;
+      
+      // Calculate intersection
+      let intersection = 0;
+      let union = 0;
+      
+      for (let i = 0; i < 128; i++) {
+        const min = Math.min(freq1[i], freq2[i]);
+        const max = Math.max(freq1[i], freq2[i]);
+        intersection += min;
+        union += max;
       }
       
-      // Add space between fragments (except for the last one)
-      if (i < fragments.length - 1) {
-        normalizedPageText += ' ';
-        normalizedCharToFragmentIndexMap.push(i); // Map the space to the current fragment
+      return union === 0 ? 0 : (intersection / union) * 100;
+    }
+    
+    // 3. Boyer-Moore inspired fast substring search (O(n/m))
+    function fastSubstringSearch(text, pattern, minSimilarity = 70) {
+      const patternLength = pattern.length;
+      const textLength = text.length;
+      
+      if (patternLength > textLength) return null;
+
+    let bestMatch = null;
+    let bestScore = 0;
+
+      // Use sliding window with step size for performance
+      const stepSize = Math.max(1, Math.floor(patternLength / 4));
+      
+      for (let i = 0; i <= textLength - patternLength; i += stepSize) {
+        const substring = text.substring(i, i + patternLength);
+        
+        // Quick exact match check
+        if (substring === pattern) {
+          return {
+            start: i,
+            end: i + patternLength,
+            score: 100,
+            type: 'exact'
+          };
+        }
+        
+        // Fast similarity check
+        const similarity = fastSimilarity(pattern, substring);
+        if (similarity > bestScore && similarity >= minSimilarity) {
+          bestScore = similarity;
+          bestMatch = {
+            start: i,
+            end: i + patternLength,
+            score: similarity,
+            type: 'fast-similarity'
+          };
+        }
+      }
+
+    return bestMatch;
+  }
+
+    // 4. Fast word-based matching using hash sets (O(n))
+    function fastWordMatching(text, pattern) {
+      const textWords = text.split(/\s+/);
+      const patternWords = pattern.split(/\s+/);
+      
+      if (patternWords.length === 0) return null;
+      
+      // Create hash set for fast lookup
+      const textWordSet = new Set(textWords);
+      const patternWordSet = new Set(patternWords);
+      
+      // Calculate word overlap
+      let intersection = 0;
+      for (const word of patternWordSet) {
+        if (textWordSet.has(word)) intersection++;
+      }
+      
+      const wordSimilarity = (intersection / patternWordSet.size) * 100;
+      
+      if (wordSimilarity > 60) {
+        // Find the best consecutive word sequence
+        let bestStart = 0;
+        let bestScore = 0;
+        
+        for (let i = 0; i <= textWords.length - patternWords.length; i++) {
+          let matches = 0;
+          for (let j = 0; j < patternWords.length; j++) {
+            if (textWords[i + j] === patternWords[j]) matches++;
+          }
+          
+          const score = (matches / patternWords.length) * 100;
+          if (score > bestScore) {
+            bestScore = score;
+            bestStart = i;
+          }
+        }
+        
+        if (bestScore > 50) {
+          // Calculate precise text position
+          let startPos = 0;
+          for (let k = 0; k < bestStart; k++) {
+            startPos += textWords[k].length + 1;
+          }
+          
+          let endPos = startPos;
+          for (let k = bestStart; k < bestStart + patternWords.length; k++) {
+            endPos += textWords[k].length + 1;
+          }
+          
+          return {
+            start: startPos,
+            end: endPos - 1,
+            score: bestScore,
+            type: 'fast-word'
+          };
+        }
+      }
+      
+      return null;
+    }
+    
+    // 5. Precise boundary refinement
+    function refineBoundaries(text, match, pattern) {
+      if (!match) return match;
+      
+      const { start, end, score, type } = match;
+      const matchedText = text.substring(start, end);
+      
+      // For exact matches, boundaries are already precise
+      if (type === 'exact') return match;
+      
+      // For fuzzy matches, try to find the most precise boundaries
+      if (type === 'fast-similarity') {
+        // Try to find the best substring within the matched region
+        let bestSubStart = 0;
+        let bestSubEnd = matchedText.length;
+        let bestSimilarity = 0;
+        
+        // Try different substring lengths within the matched region
+        for (let len = pattern.length; len >= Math.max(10, pattern.length * 0.7); len--) {
+          for (let i = 0; i <= matchedText.length - len; i++) {
+            const substring = matchedText.substring(i, i + len);
+            const similarity = fastSimilarity(pattern, substring);
+            
+            if (similarity > bestSimilarity) {
+              bestSimilarity = similarity;
+              bestSubStart = i;
+              bestSubEnd = i + len;
+            }
+          }
+        }
+        
+        // Only refine if we found a better match
+        if (bestSimilarity > score * 0.9) {
+          return {
+            start: start + bestSubStart,
+            end: start + bestSubEnd,
+            score: bestSimilarity,
+            type: 'refined-similarity'
+          };
+        }
+      }
+      
+      return match;
+    }
+    
+    // 6. Main matching logic with performance optimization
+    let bestMatch = null;
+    
+    // Strategy 1: Exact match (fastest)
+    const exactIndex = normFullText.indexOf(normQuote);
+    if (exactIndex !== -1) {
+      console.log('[Highlight] Found exact match at position:', exactIndex);
+      bestMatch = {
+        start: exactIndex,
+        end: exactIndex + normQuote.length,
+        score: 100,
+        type: 'exact'
+      };
+    } else {
+      // Strategy 2: Fast substring search
+      console.log('[Highlight] Trying fast substring search');
+      bestMatch = fastSubstringSearch(normFullText, normQuote, 70);
+      
+      if (bestMatch) {
+        console.log('[Highlight] Fast substring match found, score:', bestMatch.score);
+        // Refine boundaries for more precision
+        bestMatch = refineBoundaries(normFullText, bestMatch, normQuote);
+      } else {
+        // Strategy 3: Fast word-based matching
+        console.log('[Highlight] Trying fast word matching');
+        bestMatch = fastWordMatching(normFullText, normQuote);
+        
+        if (bestMatch) {
+          console.log('[Highlight] Fast word match found, score:', bestMatch.score);
+        }
       }
     }
     
-    normalizedPageText = normalizedPageText.trim();
-    
-    console.log('[Highlight] Normalized page text length:', normalizedPageText.length);
-    console.log('[Highlight] Character-to-fragment map length:', normalizedCharToFragmentIndexMap.length);
-    console.log('[Highlight] Normalized page text preview:', normalizedPageText.substring(0, 200) + '...');
-
-    // Find the best match in the normalized text
-    const match = findBestMatchInText(quote, normalizedPageText);
-    
-    if (match) {
-      console.log('[Highlight] Found match:', match);
-      console.log('[Highlight] Match character range:', match.start, 'to', match.end);
+    if (bestMatch) {
+      console.log('[Highlight] Best match found:', bestMatch);
       
-      // Use the character-to-fragment mapping to find the correct fragments
+      // Find which fragments are covered by this match with precise boundaries
       const matchedFragments = new Set();
       
-      for (let i = match.start; i < match.end; i++) {
-        const fragmentIndex = normalizedCharToFragmentIndexMap[i];
-        if (fragmentIndex !== undefined && fragmentIndex !== -1) {
-          matchedFragments.add(fragmentIndex);
-          console.log('[Highlight] Character', i, 'maps to fragment', fragmentIndex, ':', fragments[fragmentIndex]?.str);
+      for (let i = 0; i < fragments.length; i++) {
+        const fragmentStart = fragmentPositions[i];
+        const fragmentEnd = i < fragments.length - 1 ? fragmentPositions[i + 1] : fullText.length;
+        
+        // Check if this fragment overlaps with the match
+        if (fragmentStart < bestMatch.end && fragmentEnd > bestMatch.start) {
+          // Additional precision check: ensure the fragment actually contains part of the match
+          const fragmentText = fragments[i]?.str || '';
+          const normalizedFragmentText = normalizeText(fragmentText);
+          
+          // Check if this fragment contains any part of the matched text
+          const matchStartInFragment = Math.max(0, bestMatch.start - fragmentStart);
+          const matchEndInFragment = Math.min(fragmentText.length, bestMatch.end - fragmentStart);
+          
+          if (matchStartInFragment < matchEndInFragment) {
+            // This fragment contains part of the match
+            matchedFragments.add(i);
+            console.log('[Highlight] Fragment', i, 'matched (contains match text)');
+          } else {
+            console.log('[Highlight] Fragment', i, 'skipped (no match content)');
+          }
         }
       }
       
@@ -935,163 +1354,121 @@ function App() {
       setMatchQuality(prev => ({ 
         ...prev, 
         [pageNum]: { 
-          score: match.score, 
-          strategy: match.type, 
-          confidence: match.score > 90 ? 'high' : match.score > 75 ? 'medium' : 'low' 
+          score: bestMatch.score, 
+          strategy: bestMatch.type, 
+          confidence: bestMatch.score > 90 ? 'high' : bestMatch.score > 75 ? 'medium' : 'low' 
         } 
       }));
       
-      setHighlightWarning(null);
-      console.log('[Highlight] Best match found:', {
-        score: match.score,
-        type: match.type,
-        matchedText: match.matchedText,
-        fragments: Array.from(matchedFragments)
-      });
+      setHighlightingStatus(prev => ({ ...prev, [pageNum]: 'success' }));
+      console.log('[Highlight] Highlighting successful with', matchedFragments.size, 'fragments');
       
     } else {
-      // No match found
+      console.log('[Highlight] No match found for quote:', normQuote);
       setHighlightedFragmentIndices(prev => ({ ...prev, [pageNum]: new Set() }));
       setMatchQuality(prev => ({ 
         ...prev, 
         [pageNum]: { score: 0, strategy: 'none', confidence: 'low' } 
       }));
-      setHighlightWarning({
-        pageNum,
-        quote,
-        joined: normalizedPageText.substring(0, 500) + '...'
-      });
-      console.log('[Highlight] No match found for quote:', quote);
+      setHighlightingStatus(prev => ({ ...prev, [pageNum]: 'failed' }));
     }
   }
 
-  // Helper function to cluster adjacent fragments
-  function clusterAdjacentFragments(fragmentIndices, maxGap = 2) {
-    if (fragmentIndices.length === 0) return [];
+  // Fast retry highlighting with immediate fallback
+  function retryHighlight(pageNum, quote, attempt = 1) {
+    const maxAttempts = 2;
+    const delay = 50; // Very short delay
     
-    // Sort indices
-    const sortedIndices = [...fragmentIndices].sort((a, b) => a - b);
-    const clusters = [];
-    let currentCluster = [sortedIndices[0]];
+    console.log(`[Highlight] Retry attempt ${attempt}/${maxAttempts} for page ${pageNum}`);
+    setHighlightingStatus(prev => ({ ...prev, [pageNum]: 'retrying' }));
     
-    for (let i = 1; i < sortedIndices.length; i++) {
-      const currentIndex = sortedIndices[i];
-      const lastIndex = currentCluster[currentCluster.length - 1];
-      
-      // If fragments are adjacent or close (within maxGap), add to current cluster
-      if (currentIndex - lastIndex <= maxGap) {
-        currentCluster.push(currentIndex);
-      } else {
-        // Start a new cluster
-        clusters.push([...currentCluster]);
-        currentCluster = [currentIndex];
+    setTimeout(() => {
+      if (attempt >= maxAttempts) {
+        console.log('[Highlight] Max retry attempts reached');
+        setHighlightingStatus(prev => ({ ...prev, [pageNum]: 'failed' }));
+        return;
       }
-    }
-    
-    // Add the last cluster
-    clusters.push(currentCluster);
-    
-    return clusters;
-  }
-
-  // Legacy function for backward compatibility
-  function runFuzzyHighlight(pageNum, quote) {
+      
+      if (pageTextFragments.current[pageNum] && pageTextFragments.current[pageNum].length > 0) {
+        try {
     highlightTextInPage(pageNum, quote);
-  }
-
-  // Fallback highlighting function that works directly with fragments
-  function runFuzzyHighlightFallback(pageNum, quote) {
-    console.log('[Highlight DEBUG] runFuzzyHighlightFallback called with', { pageNum, quote });
-    setLastHighlightCall({ pageNum, quote, ts: Date.now() });
-    const fragments = pageTextFragments.current[pageNum]
-    if (!fragments || fragments.length === 0) {
-      console.warn('[Highlight Debug] No fragments found for page', pageNum)
-      setHighlightedFragmentIndices(prev => ({ ...prev, [pageNum]: new Set() }))
-      setHighlightWarning({
-        pageNum,
-        quote,
-        joined: '(No fragments found)'
-      })
-      return
-    }
-    // Super-aggressive normalization: remove all punctuation, curly quotes, hyphens, collapse whitespace, lowercase
-    const normalize = str => str
-      .replace(/[""'':,;\-]/g, '')
-      .replace(/[^\w\s]/g, '')
-      .replace(/\s+/g, ' ')
-      .toLowerCase()
-      .trim();
-    const normQuote = normalize(quote);
-    const quoteWordCount = normQuote.split(' ').length;
-    // Normalize all fragments
-    const normFragments = fragments.map(f => normalize(f.str));
-    // Sliding window over fragments, always pick the best fuzzy match
-    let bestScore = -1;
-    let bestIndices = null;
-    let bestWindow = '';
-    
-    // Try different window sizes around the quote length
-    const minWindow = Math.max(quoteWordCount - 2, 3);
-    const maxWindow = Math.min(normFragments.length, quoteWordCount + 2);
-    
-    for (let windowSize = minWindow; windowSize <= maxWindow; windowSize++) {
-      for (let i = 0; i <= normFragments.length - windowSize; i++) {
-        const window = normFragments.slice(i, i + windowSize).join(' ');
-        const score = fuzz.ratio(window, normQuote);
-        if (score > bestScore && score > 70) { // Minimum threshold to reduce noise
-          bestScore = score;
-          bestIndices = Array.from({length: windowSize}, (_, k) => i + k);
-          bestWindow = window;
+        } catch (error) {
+          console.warn(`[Highlight] Retry ${attempt} failed:`, error);
+          retryHighlight(pageNum, quote, attempt + 1);
         }
-      }
-    }
-    if (bestIndices && bestScore > 0) {
-      // Use clustering to group adjacent fragments and reduce noise
-      const clusters = clusterAdjacentFragments(bestIndices);
-      console.log('[Highlight Debug] Clusters found:', clusters);
-      
-      // Use the largest cluster (most likely to be the actual quote)
-      const largestCluster = clusters.reduce((largest, cluster) => 
-        cluster.length > largest.length ? cluster : largest, []);
-      
-      setHighlightedFragmentIndices(prev => ({ ...prev, [pageNum]: new Set(largestCluster) }));
-      setMatchQuality(prev => ({ 
-        ...prev, 
-        [pageNum]: { 
-          score: bestScore, 
-          strategy: 'fragment-fuzzy-clustered', 
-          confidence: bestScore > 90 ? 'high' : bestScore > 75 ? 'medium' : 'low' 
-        } 
-      }));
-      setHighlightWarning(null);
-      console.log('[Highlight Window] Best clustered match at fragments', largestCluster, 'score:', bestScore, 'window:', bestWindow, 'quote:', normQuote);
     } else {
-      setHighlightedFragmentIndices(prev => ({ ...prev, [pageNum]: new Set() }));
-      setMatchQuality(prev => ({ 
-        ...prev, 
-        [pageNum]: { score: 0, strategy: 'none', confidence: 'low' } 
-      }));
-      setHighlightWarning({
-        pageNum,
-        quote,
-        joined: normFragments.join(' ')
-      });
-      console.log('[Highlight Window] No match found for quote:', normQuote);
-    }
+        retryHighlight(pageNum, quote, attempt + 1);
+      }
+    }, delay);
   }
-
-  // Add effect to reset textLayerReady when currentPage changes, but only if the page actually changes
-  const prevPageRef = useRef();
-  useEffect(() => {
-    if (currentPage && prevPageRef.current !== currentPage) {
-      setTextLayerReady(prev => ({ ...prev, [currentPage]: false }));
-      prevPageRef.current = currentPage;
-    }
-  }, [currentPage]);
 
   return (
     <div id="root" style={{ width: '100vw', height: '100vh', overflow: 'hidden' }}>
+      
+      {/* Authentication Check */}
+      {!isAuthenticated ? (
+        <Auth onLogin={handleLogin} />
+      ) : (
+        <>
+          {/* Combined header with user info, logout, and navigation */}
+          <div style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: '38px',
+            backgroundColor: '#f8f9fa',
+            borderBottom: '1px solid #dee2e6',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '0 15px',
+            zIndex: 100
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div style={{ fontSize: '12px', color: '#6c757d' }}>
+                Welcome, {user?.username || 'User'}
+              </div>
+              <button
+                onClick={() => {
+                  setShowLandingModal(true)
+                  setShowExistingDocuments(false)
+                }}
+                className="btn btn-outline-primary btn-sm"
+                style={{ whiteSpace: 'nowrap', fontSize: '11px', padding: '4px 8px' }}
+              >
+                <i className="bi bi-arrow-left"></i> Open another file
+              </button>
+            </div>
+            
+            <div className="d-flex align-items-center gap-3" style={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)' }}>
+              {pdfInfo && (
+                <div style={{ 
+                  color: '#495057', 
+                  fontSize: '12px', 
+                  fontWeight: '500',
+                  textAlign: 'center',
+                  maxWidth: '250px',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap'
+                }}>
+                  {pdfInfo.original_filename || pdfInfo.filename}
+                </div>
+              )}
+            </div>
 
+            <button
+              onClick={handleLogout}
+              className="btn btn-outline-secondary btn-sm"
+              style={{ fontSize: '11px', padding: '4px 8px' }}
+            >
+              Logout
+            </button>
+          </div>
+
+          {/* Main content with adjusted top margin for header */}
+          <div style={{ marginTop: '38px', height: 'calc(100vh - 38px)' }}>
 
       {/* Landing Modal */}
       {showLandingModal && (
@@ -1224,7 +1601,7 @@ function App() {
                                 type="text"
                                 value={newDocumentName}
                                 onChange={(e) => setNewDocumentName(e.target.value)}
-                                                                  onKeyPress={(e) => e.key === 'Enter' && handleRenameDocument(doc.document_id, newDocumentName)}
+                                onKeyPress={(e) => e.key === 'Enter' && handleRenameDocument(doc.document_id, newDocumentName)}
                                 className="form-control form-control-sm mb-2"
                                 style={{ fontSize: '14px' }}
                                 autoFocus
@@ -1332,96 +1709,46 @@ function App() {
         </div>
       )}
 
-      {/* Delete Confirmation Modal */}
-      {deletingDocument && (
-        <div className="modal-overlay" style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: 'rgba(0, 0, 0, 0.5)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 1001
-        }}>
-          <div className="modal-content" style={{
-            backgroundColor: 'white',
-            borderRadius: '12px',
-            padding: '30px',
-            maxWidth: '400px',
-            width: '90%',
-            boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)'
-          }}>
-            <div className="text-center mb-4">
-              <div style={{ fontSize: '48px', color: '#dc3545', marginBottom: '16px' }}>
-                ⚠️
-              </div>
-              <h5 style={{ color: '#2d3748', marginBottom: '12px' }}>Delete Document</h5>
-              <p style={{ color: '#718096', fontSize: '14px' }}>
-                Are you sure you want to delete this document? This action cannot be undone.
-              </p>
-            </div>
-            
-            <div className="d-flex gap-3 justify-content-center">
-              <button
-                onClick={() => setDeletingDocument(null)}
-                className="btn btn-outline-secondary"
-                style={{ minWidth: '100px' }}
-              >
-                Cancel
+      <div className="App d-flex flex-column" style={{ width: '100%', height: 'calc(100vh - 38px)', overflow: 'hidden' }}>
+        {/* Status indicators */}
+        {loading && <div className="p-2 bg-info text-white text-center">Processing...</div>}
+        {error && (
+          <div className="alert alert-danger mb-0 py-2 d-flex justify-content-between align-items-center">
+            <span>{error}</span>
+            {(error.includes('Failed to load PDF') || error.includes('Error loading document')) && (
+              <button className="btn btn-sm btn-outline-danger" onClick={retryLoadDocument}>
+                <i className="bi bi-arrow-clockwise"></i> Retry
               </button>
-              <button
-                onClick={() => handleDeleteDocument(deletingDocument)}
-                className="btn btn-danger"
-                style={{ minWidth: '100px' }}
-              >
-                Delete
-              </button>
-            </div>
-                    </div>
-        </div>
-      )}
-
-      <div className="App d-flex flex-column vh-100" style={{ width: '100%', height: '100%', overflow: 'hidden' }}>
-        <div className="menu-bar p-2 bg-light border-bottom d-flex align-items-center justify-content-between" style={{ width: '100%' }}>
-            <button
-              onClick={() => {
-                setShowLandingModal(true)
-                setShowExistingDocuments(false)
-              }}
-              className="btn btn-outline-primary btn-sm"
-              style={{ whiteSpace: 'nowrap' }}
-            >
-              <i className="bi bi-arrow-left"></i> Open another file
-            </button>
-            
-            <div className="d-flex align-items-center gap-3" style={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)' }}>
-              {pdfInfo && (
-                <div style={{ 
-                  color: '#495057', 
-                  fontSize: '14px', 
-                  fontWeight: '500',
-                  textAlign: 'center',
-                  maxWidth: '300px',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap'
-                }}>
-                  {pdfInfo.original_filename || pdfInfo.filename}
-                </div>
-              )}
-            </div>
-
-          {loading && <span className="ms-2">Processing...</span>}
-          {error && <div className="alert alert-danger mb-0 py-1">{error}</div>}
-        </div>
+            )}
+          </div>
+        )}
         {file && !error && (
-          <div className="main-content" style={{ display: 'flex', flex: 1, height: '100%' }}>
+          <div className="main-content" style={{ display: 'flex', flex: 1, minHeight: 0 }}>
             {/* PDF Viewer */}
             <div className="pdf-container" ref={pdfViewerRef}>
-              <Document file={file} onLoadSuccess={onDocumentLoadSuccess}>
+              <Document 
+                file={file} 
+                onLoadSuccess={onDocumentLoadSuccess}
+                onLoadError={onDocumentLoadError}
+                loading={
+                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '200px' }}>
+                    <div className="spinner-border" role="status">
+                      <span className="visually-hidden">Loading PDF...</span>
+                    </div>
+                  </div>
+                }
+                error={
+                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '200px', color: '#dc3545' }}>
+                    <div>
+                      <i className="bi bi-exclamation-triangle"></i>
+                      <p>Failed to load PDF</p>
+                      <button className="btn btn-sm btn-outline-primary" onClick={retryLoadDocument}>
+                        Retry
+                      </button>
+                    </div>
+                  </div>
+                }
+              >
                   {Array.from(new Array(numPages), (el, index) => {
                     const pageNum = index + 1;
                   const inContext = pageNum >= pageRange[0] && pageNum <= pageRange[1];
@@ -1430,13 +1757,13 @@ function App() {
                       {/* Page number label */}
                       <div style={{
                         position: 'absolute',
-                        top: 8,
-                        left: 8,
+                        top: 6,
+                        left: 6,
                         background: 'rgba(0,0,0,0.6)',
                         color: '#fff',
-                        padding: '2px 8px',
-                        borderRadius: 4,
-                        fontSize: 14,
+                        padding: '1px 6px',
+                        borderRadius: 3,
+                        fontSize: 11,
                         zIndex: 10
                       }}>
                         Page {pageNum}
@@ -1445,13 +1772,13 @@ function App() {
                       {inContext && (
                         <div style={{
                           position: 'absolute',
-                          top: 8,
-                          right: 8,
+                          top: 6,
+                          right: 6,
                           background: '#007bff',
                           color: '#fff',
-                          padding: '2px 8px',
-                          borderRadius: 4,
-                          fontSize: 12,
+                          padding: '1px 6px',
+                          borderRadius: 3,
+                          fontSize: 10,
                           zIndex: 10
                         }}>
                           In Chat Context
@@ -1461,18 +1788,38 @@ function App() {
                       {matchQuality[pageNum] && matchQuality[pageNum].score > 0 && (
                         <div style={{
                           position: 'absolute',
-                          bottom: 8,
-                          left: 8,
+                          bottom: 6,
+                          left: 6,
                           background: matchQuality[pageNum].confidence === 'high' ? '#d4edda' : 
                                      matchQuality[pageNum].confidence === 'medium' ? '#fff3cd' : '#f8d7da',
                           color: matchQuality[pageNum].confidence === 'high' ? '#155724' : 
                                  matchQuality[pageNum].confidence === 'medium' ? '#856404' : '#721c24',
-                          padding: '2px 8px',
-                          borderRadius: 4,
-                          fontSize: 12,
+                          padding: '1px 6px',
+                          borderRadius: 3,
+                          fontSize: 10,
                           zIndex: 10
                         }}>
                           Match: {matchQuality[pageNum].score}% ({matchQuality[pageNum].strategy})
+                        </div>
+                      )}
+                      
+                      {/* Highlighting status indicator */}
+                      {highlightingStatus[pageNum] && (
+                        <div style={{
+                          position: 'absolute',
+                          bottom: 6,
+                          right: 6,
+                          background: highlightingStatus[pageNum] === 'success' ? '#d4edda' : 
+                                     highlightingStatus[pageNum] === 'retrying' ? '#fff3cd' : '#f8d7da',
+                          color: highlightingStatus[pageNum] === 'success' ? '#155724' : 
+                                 highlightingStatus[pageNum] === 'retrying' ? '#856404' : '#721c24',
+                          padding: '1px 6px',
+                          borderRadius: 3,
+                          fontSize: 10,
+                          zIndex: 10
+                        }}>
+                          {highlightingStatus[pageNum] === 'success' ? '✓ Highlighted' : 
+                           highlightingStatus[pageNum] === 'retrying' ? '⟳ Retrying...' : '✗ Failed'}
                         </div>
                       )}
                       <Page
@@ -1517,7 +1864,6 @@ function App() {
                           return str;
                         }}
                         onRenderSuccess={() => {
-                          console.log('[Highlight DEBUG] onRenderSuccess for page', pageNum, 'currentPage:', currentPage, 'highlightedQuote:', highlightedQuote);
                           setTextLayerReady(prev => {
                             if (prev[pageNum]) return prev; // already true, do not update
                             return { ...prev, [pageNum]: true };
@@ -1525,17 +1871,16 @@ function App() {
                           
                           // Only highlight if this is the current page and we have a quote to highlight
                           if (currentPage === pageNum && highlightedQuote) {
-                            console.log('[Highlight DEBUG] Condition met, calling highlightTextInPage for', pageNum, highlightedQuote);
-                            // Use a small delay to ensure fragments are collected
-                            setTimeout(() => {
-                              // Try the enhanced method first, fallback to original if needed
-                              try {
-                                highlightTextInPage(pageNum, highlightedQuote);
-                              } catch (error) {
-                                console.warn('[Highlight] Enhanced method failed, trying fallback:', error);
-                                runFuzzyHighlightFallback(pageNum, highlightedQuote);
-                              }
-                            }, 100);
+                            console.log('[Highlight] Rendering page', pageNum, 'with quote:', highlightedQuote);
+                            // Use retry mechanism for reliability
+                            retryHighlight(pageNum, highlightedQuote);
+                          }
+                        }}
+                        onRenderError={(error) => {
+                          console.error('[Highlight] Render error for page', pageNum, ':', error);
+                          // If render fails, try simple retry
+                          if (currentPage === pageNum && highlightedQuote) {
+                            setTimeout(() => highlightTextInPage(pageNum, highlightedQuote), 50);
                           }
                         }}
                       />
@@ -1545,20 +1890,20 @@ function App() {
               </Document>
             </div>
             {/* Chat Panel */}
-            <div className="right-panel" style={{ width: '50%', height: '100%' }}>
-              <div className="chat-panel" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                <div className="chat-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid #dee2e6' }}>
-                  <h3 style={{ margin: 0 }}>Chat with Gemini</h3>
+            <div className="right-panel" style={{ width: '50%', height: '100%', overflow: 'hidden' }}>
+              <div className="chat-panel" style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+                <div className="chat-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 15px', borderBottom: '1px solid #dee2e6', flexShrink: 0 }}>
+                  <h3 style={{ margin: 0, fontSize: '16px' }}>Chat with Gemini</h3>
                   <button 
                     onClick={clearChat}
                     className="btn btn-outline-danger btn-sm"
-                    style={{ fontSize: '12px', padding: '4px 8px' }}
+                    style={{ fontSize: '11px', padding: '3px 6px' }}
                     title="Clear chat history"
                   >
                     <i className="bi bi-trash"></i> Clear Chat
                   </button>
                 </div>
-                <div className="chat-messages" ref={chatMessagesRef} style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+                <div className="chat-messages" ref={chatMessagesRef} style={{ flex: 1, overflowY: 'auto', padding: 15, minHeight: 0 }}>
                   <>
                     {chatMessages.map((msg, idx) => (
                       <div key={idx} className={`chat-message ${msg.role}`}> 
@@ -1573,63 +1918,63 @@ function App() {
                               }
                             </div>
                           )}
-                                                  {/* Render markdown content */}
-                        <ReactMarkdown 
-                          components={{
-                            // Style different markdown elements
-                            h1: ({node, ...props}) => <h1 style={{fontSize: '1.5em', fontWeight: 'bold', marginBottom: '0.5em', color: '#2c3e50'}} {...props} />,
-                            h2: ({node, ...props}) => <h2 style={{fontSize: '1.3em', fontWeight: 'bold', marginBottom: '0.4em', color: '#34495e'}} {...props} />,
-                            h3: ({node, ...props}) => <h3 style={{fontSize: '1.1em', fontWeight: 'bold', marginBottom: '0.3em', color: '#34495e'}} {...props} />,
-                            p: ({node, ...props}) => <p style={{marginBottom: '0.8em', lineHeight: '1.6'}} {...props} />,
-                            ul: ({node, ...props}) => <ul style={{marginBottom: '0.8em', paddingLeft: '1.5em'}} {...props} />,
-                            ol: ({node, ...props}) => <ol style={{marginBottom: '0.8em', paddingLeft: '1.5em'}} {...props} />,
-                            li: ({node, ...props}) => <li style={{marginBottom: '0.3em'}} {...props} />,
-                            strong: ({node, ...props}) => <strong style={{fontWeight: 'bold', color: '#2c3e50'}} {...props} />,
-                            em: ({node, ...props}) => <em style={{fontStyle: 'italic', color: '#7f8c8d'}} {...props} />,
-                            code: ({node, ...props}) => <code style={{backgroundColor: '#f8f9fa', padding: '0.2em 0.4em', borderRadius: '3px', fontSize: '0.9em', fontFamily: 'monospace'}} {...props} />,
-                            blockquote: ({node, ...props}) => <blockquote style={{borderLeft: '4px solid #3498db', paddingLeft: '1em', marginLeft: '0', fontStyle: 'italic', color: '#7f8c8d'}} {...props} />,
-                            // Custom component for reference links
-                            li: ({node, children, ...props}) => {
-                              // Get the text content
-                              let text = '';
-                              if (typeof children === 'string') {
-                                text = children;
-                              } else if (children?.props?.children) {
-                                text = children.props.children;
-                              } else if (Array.isArray(children)) {
-                                text = children.map(child => 
-                                  typeof child === 'string' ? child : child?.props?.children || ''
-                                ).join('');
-                              }
-                              
-                              // Check if this is a reference line
-                              if (text && text.includes('PDF page') && text.includes('"')) {
-                                // Extract page number and quote from the reference text
-                                const pageMatch = text.match(/PDF page (\d+): "([^"]+)"/);
-                                if (pageMatch) {
-                                  const page = parseInt(pageMatch[1]);
-                                  const quote = pageMatch[2];
-                                  return (
-                                    <li 
-                                      {...props} 
-                                      style={{ marginBottom: '0.3em', cursor: 'pointer', color: '#007bff', listStyle: 'disc' }}
-                                      onClick={() => handleReferenceClick({ page, quote })}
-                                    >
-                                      {children}
-                                    </li>
-                                  );
+                          {/* Render markdown content */}
+                          <ReactMarkdown 
+                            components={{
+                              // Style different markdown elements
+                              h1: ({node, ...props}) => <h1 style={{fontSize: '1.2em', fontWeight: 'bold', marginBottom: '0.4em', color: '#2c3e50'}} {...props} />,
+                              h2: ({node, ...props}) => <h2 style={{fontSize: '1.1em', fontWeight: 'bold', marginBottom: '0.3em', color: '#34495e'}} {...props} />,
+                              h3: ({node, ...props}) => <h3 style={{fontSize: '1em', fontWeight: 'bold', marginBottom: '0.25em', color: '#34495e'}} {...props} />,
+                              p: ({node, ...props}) => <p style={{marginBottom: '0.6em', lineHeight: '1.5', fontSize: '12px'}} {...props} />,
+                              ul: ({node, ...props}) => <ul style={{marginBottom: '0.6em', paddingLeft: '1.2em', fontSize: '12px'}} {...props} />,
+                              ol: ({node, ...props}) => <ol style={{marginBottom: '0.6em', paddingLeft: '1.2em', fontSize: '12px'}} {...props} />,
+                              strong: ({node, ...props}) => <strong style={{fontWeight: 'bold', color: '#2c3e50'}} {...props} />,
+                              em: ({node, ...props}) => <em style={{fontStyle: 'italic', color: '#7f8c8d'}} {...props} />,
+                              code: ({node, ...props}) => <code style={{backgroundColor: '#f8f9fa', padding: '0.15em 0.3em', borderRadius: '2px', fontSize: '11px', fontFamily: 'monospace'}} {...props} />,
+                              blockquote: ({node, ...props}) => <blockquote style={{borderLeft: '3px solid #3498db', paddingLeft: '0.8em', marginLeft: '0', fontStyle: 'italic', color: '#7f8c8d', fontSize: '12px'}} {...props} />,
+                              // Custom component for reference links
+                              li: ({node, children, ...props}) => {
+                                // Get the text content
+                                let text = '';
+                                if (typeof children === 'string') {
+                                  text = children;
+                                } else if (children?.props?.children) {
+                                  text = children.props.children;
+                                } else if (Array.isArray(children)) {
+                                  text = children.map(child => 
+                                    typeof child === 'string' ? child : child?.props?.children || ''
+                                  ).join('');
                                 }
+                                
+                                // Check if this is a reference line
+                                if (text && text.includes('PDF page') && text.includes('"')) {
+                                  // Extract page number and quote from the reference text
+                                  const pageMatch = text.match(/PDF page (\d+): "([^"]+)"/);
+                                  if (pageMatch) {
+                                    const page = parseInt(pageMatch[1]);
+                                    const quote = pageMatch[2];
+                                    return (
+                                      <li 
+                                        {...props} 
+                                        style={{ marginBottom: '0.3em', cursor: 'pointer', color: '#007bff', listStyle: 'disc' }}
+                                        onClick={() => handleReferenceClick({ page, quote })}
+                                      >
+                                        {children}
+                                      </li>
+                                    );
+                                  }
+                                }
+                                return <li {...props} style={{ marginBottom: '0.25em', fontSize: '12px' }}>{children}</li>;
                               }
-                              return <li {...props} style={{ marginBottom: '0.3em' }}>{children}</li>;
-                            }
-                          }}
-                        >
-                          {msg.content}
-                        </ReactMarkdown>
+                            }}
+                          >
+                            {msg.content}
+                          </ReactMarkdown>
                           
                         </div>
                       </div>
                     ))}
+                    
                     {loading && (
                       <div className="chat-message assistant">
                         <div className="message-content" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -1642,10 +1987,10 @@ function App() {
                     )}
                   </>
                 </div>
-                <div className="chat-input" style={{ padding: 16, background: '#fff', borderTop: '1px solid #dee2e6' }}>
+                <div className="chat-input" style={{ padding: 12, background: '#fff', borderTop: '1px solid #dee2e6', flexShrink: 0 }}>
                   <div className="chat-input-container" style={{ 
                     border: '2px solid #e9ecef', 
-                    borderRadius: '8px', 
+                    borderRadius: '6px', 
                     overflow: 'hidden',
                     backgroundColor: '#f8f9fa',
                     width: '100%'
@@ -1653,15 +1998,15 @@ function App() {
                     {/* First Line - Context Page Range */}
                     {numPages && (
                       <div className="context-line" style={{ 
-                        padding: '8px 12px', 
+                        padding: '6px 9px', 
                         borderBottom: '1px solid #e9ecef',
                         backgroundColor: '#ffffff',
                         display: 'flex',
                         alignItems: 'center',
-                        gap: '8px',
-                        fontSize: '13px'
+                        gap: '6px',
+                        fontSize: '11px'
                       }}>
-                        <span style={{ color: '#6c757d', fontWeight: '500', minWidth: '80px' }}>Context pages:</span>
+                        <span style={{ color: '#6c757d', fontWeight: '500', minWidth: '60px' }}>Context pages:</span>
                         <div className="d-flex align-items-center gap-1">
                           <input
                             type="text"
@@ -1669,18 +2014,18 @@ function App() {
                             onChange={e => handlePageRangeChange(e.target.value)}
                             placeholder="e.g., 5; 7; 11-13; [1-3;5-7]"
                             style={{ 
-                              width: '400px', 
-                              padding: '4px 6px', 
+                              width: '300px', 
+                              padding: '3px 5px', 
                               border: '1px solid #ced4da', 
-                              borderRadius: '4px',
-                              fontSize: '13px',
+                              borderRadius: '3px',
+                              fontSize: '11px',
                               textAlign: 'left',
                               backgroundColor: '#fff'
                             }}
                           />
-                                                      <span style={{ color: '#6c757d' }}>of {numPages}</span>
+                                                      <span style={{ color: '#6c757d', fontSize: '11px' }}>of {numPages}</span>
                             {parsedPageRanges.length > 0 && (
-                              <span style={{ color: '#28a745', fontSize: '12px', marginLeft: '8px' }}>
+                              <span style={{ color: '#28a745', fontSize: '10px', marginLeft: '6px' }}>
                                 ({parsedPageRanges.length} pages selected)
                               </span>
                             )}
@@ -1689,7 +2034,7 @@ function App() {
                           <button
                             onClick={() => setPageRange(parsedPageRanges.length > 0 ? [parsedPageRanges[0], parsedPageRanges[parsedPageRanges.length - 1]] : [1, numPages])}
                             className="btn btn-outline-secondary btn-sm"
-                            style={{ fontSize: '11px', padding: '2px 6px', marginLeft: '4px' }}
+                            style={{ fontSize: '10px', padding: '2px 4px', marginLeft: '3px' }}
                             title="Reset to parsed pages"
                           >
                             Reset
@@ -1700,10 +2045,10 @@ function App() {
                     
                     {/* Second Line - Message Input */}
                     <div className="message-line" style={{ 
-                      padding: '8px 12px',
+                      padding: '6px 9px',
                       display: 'flex',
                       alignItems: 'center',
-                      gap: '8px'
+                      gap: '6px'
                     }}>
                       <input
                         type="text"
@@ -1716,7 +2061,7 @@ function App() {
                           flex: 1, 
                           border: 'none',
                           outline: 'none',
-                          fontSize: '14px',
+                          fontSize: '12px',
                           backgroundColor: 'transparent'
                         }}
                       />
@@ -1725,8 +2070,8 @@ function App() {
                         disabled={loading || !pdfInfo}
                         className="btn btn-primary btn-sm"
                         style={{ 
-                          padding: '6px 12px',
-                          fontSize: '13px',
+                          padding: '4px 9px',
+                          fontSize: '11px',
                           fontWeight: '500'
                         }}
                       >
@@ -1740,7 +2085,10 @@ function App() {
           </div>
         )}
 
-      </div>
+          </div>
+        </div>
+        </>
+      )}
     </div>
   )
 }
