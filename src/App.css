@@ -614,25 +614,9 @@
   }
 }
 
-/* Enhanced highlight styling for PDF text fragments */
-.highlighted-fragment {
-  background-color: rgba(255, 224, 102, 0.8) !important; /* 80% opacity yellow */
-  color: #000 !important; /* Black text */
-  border-radius: 2px !important;
-  padding: 1px 2px !important;
-  box-shadow: none !important;
-  opacity: 1 !important;
-  visibility: visible !important;
-  display: inline !important;
-  position: static !important;
-  z-index: auto !important;
-  text-shadow: none !important;
-  font-weight: inherit !important;
-  line-height: inherit !important;
-  vertical-align: baseline !important;
-  margin: 0 !important;
-  border: none !important;
-}
+
+
+
 
 /* Landing Modal Styles */
 .modal-overlay {
@@ -660,6 +644,18 @@
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes pulse {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+  100% {
+    opacity: 1;
   }
 }
 
@@ -749,4 +745,116 @@
   20% { opacity: 1; transform: translateY(0); }
   80% { opacity: 1; transform: translateY(0); }
   100% { opacity: 0; transform: translateY(-10px); }
+}
+
+/* Classic PDF viewer page number styling */
+.page-number-indicator {
+  transition: all 0.2s ease-in-out;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.page-number-indicator:hover {
+  background: #e9ecef !important;
+  border-color: #adb5bd !important;
+  color: #212529 !important;
+}
+
+/* PDF page styling for better visual separation */
+.pdf-page-container {
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+  transition: box-shadow 0.2s ease;
+}
+
+.pdf-page-container:hover {
+  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+}
+
+/* Chat input styling */
+.chat-input {
+  background-color: #f8f9fa;
+}
+
+.context-line {
+  transition: all 0.2s ease;
+}
+
+.message-line {
+  transition: all 0.2s ease;
+}
+
+.chat-input input {
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.chat-input input:focus {
+  outline: none;
+}
+
+/* Responsive adjustments for chat input */
+@media (max-width: 768px) {
+  .context-line {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  
+  .context-line span:first-child {
+    min-width: auto;
+  }
+}
+
+/* Chat message styling for OpenAI-style layout */
+.chat-messages .user-message {
+  text-align: right;
+}
+
+.chat-messages .assistant-message {
+  text-align: left;
+}
+
+/* ReactMarkdown styling for user messages (white text on blue background) */
+.chat-messages .user-message .react-markdown {
+  color: white;
+}
+
+.chat-messages .user-message .react-markdown h1,
+.chat-messages .user-message .react-markdown h2,
+.chat-messages .user-message .react-markdown h3,
+.chat-messages .user-message .react-markdown h4,
+.chat-messages .user-message .react-markdown h5,
+.chat-messages .user-message .react-markdown h6 {
+  color: white;
+}
+
+.chat-messages .user-message .react-markdown a {
+  color: #ffd700;
+}
+
+.chat-messages .user-message .react-markdown code {
+  background-color: rgba(255, 255, 255, 0.2);
+  color: white;
+}
+
+.chat-messages .user-message .react-markdown pre {
+  background-color: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+/* ReactMarkdown styling for assistant messages (dark text on light background) */
+.chat-messages .assistant-message .react-markdown {
+  color: #212529;
+}
+
+.chat-messages .assistant-message .react-markdown a {
+  color: #007bff;
+}
+
+.chat-messages .assistant-message .react-markdown code {
+  background-color: #f8f9fa;
+  color: #212529;
+}
+
+.chat-messages .assistant-message .react-markdown pre {
+  background-color: #f8f9fa;
+  color: #212529;
 }

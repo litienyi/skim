@@ -4,7 +4,8 @@ A powerful React-based tool for analyzing PDF documents, extracting text blocks,
 
 ## Features
 
-- PDF file upload and viewing
+- PDF file upload and viewing (text-based PDFs only)
+- Folder import functionality - Import multiple PDFs from external folders
 - Interactive text block selection and ordering
 - Sentence boundary detection and management
 - Rhetorical function analysis using Google's Gemini AI
@@ -104,6 +105,18 @@ skim2/
 6. View the analysis results with relevance scores
 7. Add or remove custom sentences as needed
 
+### Folder Import Feature
+
+The application now supports importing multiple PDF files from external folders:
+
+1. Click the "Import from folder" button in the header
+2. Enter the full path to your PDF folder
+3. Click "Scan Folder" to find all PDF files
+4. Select the files you want to import
+5. Click "Import Selected Files" to add them to your library
+
+For detailed instructions, see [README_FOLDER_IMPORT.md](README_FOLDER_IMPORT.md).
+
 ## API Endpoints
 
 - POST /api/upload: Upload and process PDF
@@ -117,6 +130,12 @@ skim2/
 - POST /api/toggle-sentence-starter: Toggle sentence starter
 - POST /api/reset-sentence-numbers: Reset sentence numbering
 - POST /api/reinitialize-db: Reset database
+
+### Folder Management Endpoints
+- POST /api/folder/scan: Scan folder for PDF files
+- POST /api/folder/import: Import PDF files from folder
+- GET /api/folder/config: Get folder configuration
+- POST /api/folder/reset: Reset to default folder
 
 ## Development
 
