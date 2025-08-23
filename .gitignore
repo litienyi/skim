@@ -7,6 +7,18 @@ backend/uploads/
 backend/*.db
 backend/__pycache__/
 backend/.env
+backend/venv/
+backend/*.db.backup*
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Database files
+*.db
+*.db.backup*
+skim2_local.db*
 
 # Python
 __pycache__/
@@ -24,3 +36,21 @@ __pycache__/
 
 # Logs
 *.log
+
+# Secrets and API keys
+*.key
+*.pem
+*.p12
+*.pfx
+api_keys.txt
+secrets.json
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
