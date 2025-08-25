@@ -244,6 +244,9 @@ function App() {
     
     console.log(`[PDF Load] Retry attempt ${attempt}/${maxAttempts} for file ${filePath}`)
     
+    // Show retry message to user
+    setError(`Loading document... (attempt ${attempt}/${maxAttempts}) - This may take a few minutes for large files`)
+    
     setTimeout(async () => {
       if (attempt >= maxAttempts) {
         console.log('[PDF Load] Max retry attempts reached')
@@ -253,8 +256,13 @@ function App() {
       
       try {
         await loadExistingDocument(filePath)
+        // If we get here, the retry succeeded
+        console.log(`[PDF Load] Retry ${attempt} succeeded!`)
+        setError(null) // Clear any error messages
+        return // Exit the retry function successfully
       } catch (error) {
         console.log(`[PDF Load] Retry ${attempt} failed:`, error)
+        console.log(`[PDF Load] Error message:`, error.message)
         // Only retry if the error is not a 404 (document not found)
         if (!error.message.includes('404')) {
           retryPdfLoad(filePath, attempt + 1)
@@ -280,6 +288,9 @@ function App() {
 
   // Load existing document from server
   async function loadExistingDocument(filePath) {
+    console.log('=== LOAD EXISTING DOCUMENT START ===')
+    console.log('filePath:', filePath)
+    
     // Add defensive check to prevent undefined filePath
     if (!filePath) {
       console.error('loadExistingDocument called with undefined filePath')
@@ -288,71 +299,251 @@ function App() {
     }
     
     try {
+      console.log('Setting loading state...')
       setLoading(true)
-      setError(null)
+      setError('Loading document... This may take a few minutes for large files')
       
-      // Remove leading slash to avoid redirect issues with CORS
-      const cleanPath = filePath.startsWith('/') ? filePath.substring(1) : filePath
-      const encodedPath = encodeURIComponent(cleanPath)
-      const response = await fetch(`${API_URL}/documents/${encodedPath}`)
+      // Keep the full path as is, just encode it properly
+      const encodedPath = encodeURIComponent(filePath)
+      console.log('Encoded path:', encodedPath)
+      console.log('Making request to:', `${API_URL}/documents/${encodedPath}`)
+      
+      const response = await fetch(`${API_URL}/documents/${encodedPath}`, {
+        signal: AbortSignal.timeout(120000) // 2 minute timeout for large files
+      })
+      
+      console.log('Response status:', response.status)
+      console.log('Response ok:', response.ok)
       
       if (!response.ok) {
+        console.log('Response not ok, throwing error')
         throw new Error(`HTTP ${response.status}: ${response.statusText}`)
       }
       
+      console.log('Parsing response JSON...')
       const data = await response.json()
+      console.log('Response data:', data)
       
-      // Create a blob URL for the PDF
-      const pdfResponse = await fetch(`${API_URL}/documents/${encodedPath}/file`)
+      // For existing documents, we need to fetch the file from the server
+      // since we don't have the original file object
+      console.log('=== TIMING DEBUG ===')
+      const fetchStartTime = Date.now()
+      console.log('Starting PDF fetch at:', fetchStartTime)
+      
+      console.log('Fetching PDF file from:', `${API_URL}/documents/${encodedPath}/file`)
+      const pdfResponse = await fetch(`${API_URL}/documents/${encodedPath}/file`, {
+        signal: AbortSignal.timeout(120000) // 2 minute timeout for large files
+      })
+      
+      const fetchEndTime = Date.now()
+      console.log('PDF fetch completed at:', fetchEndTime)
+      console.log('Fetch duration:', fetchEndTime - fetchStartTime, 'ms')
+      console.log('PDF response status:', pdfResponse.status)
+      console.log('PDF response ok:', pdfResponse.ok)
+      
       if (!pdfResponse.ok) {
+        console.log('PDF response not ok, throwing error')
         throw new Error('Failed to fetch PDF file')
       }
       
-      const pdfBlob = await pdfResponse.blob()
-      const blobUrl = URL.createObjectURL(pdfBlob)
+      // Clone the response to avoid body consumption issues
+      console.log('Cloning PDF response...')
+      const clonedResponse = pdfResponse.clone()
+      console.log('PDF response cloned successfully')
       
-      // Clean up previous blob URL
-      if (currentBlobUrl) {
-        cleanupBlobUrl(currentBlobUrl)
+      console.log('=== RESPONSE ANALYSIS ===')
+      console.log('Original response type:', pdfResponse.type)
+      console.log('Original response headers:', [...pdfResponse.headers.entries()])
+      console.log('Original response body used:', pdfResponse.bodyUsed)
+      console.log('Original response status:', pdfResponse.status)
+      console.log('Cloned response type:', clonedResponse.type)
+      console.log('Cloned response headers:', [...clonedResponse.headers.entries()])
+      console.log('Cloned response body used:', clonedResponse.bodyUsed)
+      console.log('Cloned response status:', clonedResponse.status)
+      
+      // Check for specific headers that might indicate issues
+      const contentType = clonedResponse.headers.get('content-type')
+      const contentLength = clonedResponse.headers.get('content-length')
+      console.log('Content-Type:', contentType)
+      console.log('Content-Length:', contentLength)
+      
+      let pdfBlob, blobUrl
+      try {
+        // Check if cloned response body is already used
+        if (clonedResponse.bodyUsed) {
+          console.error('Cloned response body already used, cannot create blob')
+          throw new Error('Cloned response body already consumed')
+        }
+        
+        // Check if cloned response is ok
+        if (!clonedResponse.ok) {
+          console.error('Cloned PDF response not ok:', clonedResponse.status, clonedResponse.statusText)
+          throw new Error(`Cloned PDF response failed: ${clonedResponse.status}`)
+        }
+        
+        console.log('Reading response as array buffer...')
+        const blobStartTime = Date.now()
+        console.log('Starting blob creation at:', blobStartTime)
+        
+        // Ensure response is fully ready before processing
+        await new Promise(resolve => setTimeout(resolve, 10))
+        
+        let arrayBuffer
+        try {
+          arrayBuffer = await clonedResponse.arrayBuffer()
+          const arrayBufferEndTime = Date.now()
+          console.log('Array buffer created successfully')
+          console.log('Array buffer creation duration:', arrayBufferEndTime - blobStartTime, 'ms')
+          console.log('Array buffer size:', arrayBuffer.byteLength)
+        } catch (arrayBufferError) {
+          console.error('=== ARRAY BUFFER ERROR ===')
+          console.error('Array buffer error:', arrayBufferError.message)
+          console.log('Trying direct blob creation as fallback...')
+          try {
+            pdfBlob = await clonedResponse.blob()
+            console.log('Direct blob creation succeeded')
+            console.log('PDF blob size:', pdfBlob.size)
+            console.log('PDF blob type:', pdfBlob.type)
+          } catch (blobError) {
+            console.error('=== DIRECT BLOB ERROR ===')
+            console.error('Direct blob error:', blobError.message)
+            console.log('Trying fresh request as final fallback...')
+            
+            // Make a fresh request specifically for blob
+            const freshResponse = await fetch(`${API_URL}/documents/${encodedPath}/file`, {
+              signal: AbortSignal.timeout(120000)
+            })
+            
+            if (!freshResponse.ok) {
+              throw new Error(`Fresh request failed: ${freshResponse.status}`)
+            }
+            
+            pdfBlob = await freshResponse.blob()
+            console.log('Fresh request blob creation succeeded')
+            console.log('PDF blob size:', pdfBlob.size)
+            console.log('PDF blob type:', pdfBlob.type)
+          }
+        }
+        
+        if (!arrayBuffer && !pdfBlob) {
+          console.error('Both array buffer and direct blob creation failed')
+          throw new Error('Failed to read response data')
+        }
+        
+        if (arrayBuffer) {
+          if (arrayBuffer.byteLength === 0) {
+            console.error('Array buffer is empty')
+            throw new Error('Empty array buffer')
+          }
+          
+          console.log('Creating blob from array buffer...')
+          // Ensure array buffer is fully processed before creating blob
+          await new Promise(resolve => setTimeout(resolve, 10))
+          pdfBlob = new Blob([arrayBuffer], { type: 'application/pdf' })
+          console.log('PDF blob created successfully')
+          console.log('PDF blob size:', pdfBlob.size)
+          console.log('PDF blob type:', pdfBlob.type)
+        }
+        
+        if (!pdfBlob || pdfBlob.size === 0) {
+          console.error('Created blob is empty or invalid')
+          throw new Error('Invalid blob created')
+        }
+        
+        console.log('Creating object URL from blob...')
+        blobUrl = URL.createObjectURL(pdfBlob)
+        console.log('Created blob URL successfully:', blobUrl)
+        console.log('Blob URL length:', blobUrl.length)
+      } catch (blobError) {
+        console.error('=== BLOB CREATION ERROR ===')
+        console.error('Blob error message:', blobError.message)
+        console.error('Blob error stack:', blobError.stack)
+        console.error('Blob error type:', blobError.constructor.name)
+        throw blobError
       }
       
-      setCurrentBlobUrl(blobUrl)
-      setFile(blobUrl)
-      setPdfInfo(data)
+      // Ensure all state updates happen in sequence
+      await new Promise(resolve => {
+        // Clean up previous blob URL
+        if (currentBlobUrl) {
+          cleanupBlobUrl(currentBlobUrl)
+        }
+        
+        console.log('Setting blob URL and file...')
+        setCurrentBlobUrl(blobUrl)
+        setFile(blobUrl)
+        setPdfInfo(data)
+        
+        // Use setTimeout to ensure state updates are processed
+        setTimeout(resolve, 0)
+      })
       
+      console.log('Loading most recent chat session...')
       // Load the most recent chat session for this document
       await loadMostRecentChatSession(filePath)
+      console.log('Chat session loaded successfully')
       
     } catch (error) {
-      console.error('Error loading document:', error)
-      setError(`Failed to load document: ${error.message}`)
-      // Retry with exponential backoff
-      retryPdfLoad(filePath)
+      console.error('=== ERROR IN LOAD EXISTING DOCUMENT ===')
+      console.error('Error message:', error.message)
+      console.error('Error stack:', error.stack)
+      console.error('Error type:', error.constructor.name)
+      
+      // Don't show error immediately, let retry mechanism handle it
+      // Only show error if it's a 404 (document not found) or if we're not retrying
+      if (error.message.includes('404')) {
+        console.log('404 error detected, showing error immediately')
+        setError('Document not found')
+      } else {
+        console.log('Non-404 error, triggering retry...')
+        // Retry with exponential backoff
+        retryPdfLoad(filePath, 1)
+      }
     } finally {
+      console.log('Setting loading to false')
       setLoading(false)
+      console.log('=== LOAD EXISTING DOCUMENT END ===')
     }
   }
 
   // Load chat history
   async function loadChatHistory(sessionId) {
+    console.log('=== LOAD CHAT HISTORY START ===')
+    console.log('Session ID:', sessionId)
+    
     try {
+      console.log('Fetching chat history from:', `${API_URL}/chat/sessions/${sessionId}`)
       const response = await fetch(`${API_URL}/chat/sessions/${sessionId}`)
+      console.log('Chat history response status:', response.status)
+      console.log('Chat history response ok:', response.ok)
+      
       if (response.ok) {
+        console.log('Parsing chat history response...')
         const data = await response.json()
+        console.log('Chat history data:', data)
         const messages = data.messages || []
         console.log(`Loaded ${messages.length} messages from chat session ${sessionId}`)
         setChatMessages(messages)
         setCurrentChatSessionId(sessionId)
+        console.log('Chat messages and session ID set successfully')
       } else {
         console.error(`Failed to load chat session ${sessionId}: ${response.status}`)
       }
     } catch (error) {
-      console.error('Error loading chat history:', error)
+      console.error('=== CHAT HISTORY LOAD ERROR ===')
+      console.error('Chat history error message:', error.message)
+      console.error('Chat history error stack:', error.stack)
+      console.error('Chat history error type:', error.constructor.name)
     }
+    
+    console.log('=== LOAD CHAT HISTORY END ===')
   }
 
   // Load the most recent chat session for a document
   async function loadMostRecentChatSession(filePath) {
+    console.log('=== LOAD MOST RECENT CHAT SESSION START ===')
+    console.log('File path:', filePath)
+    
     // Add defensive check to prevent undefined filePath
     if (!filePath) {
       console.error('loadMostRecentChatSession called with undefined filePath')
@@ -360,19 +551,31 @@ function App() {
     }
     
     try {
-      // Remove leading slash to avoid redirect issues with CORS
+      // Remove leading slash if present for the API call (to match backend expectation)
       const cleanPath = filePath.startsWith('/') ? filePath.substring(1) : filePath
       const encodedPath = encodeURIComponent(cleanPath)
+      console.log('Original file path:', filePath)
+      console.log('Clean path for API:', cleanPath)
+      console.log('Encoded path for chat sessions:', encodedPath)
+      console.log('Fetching chat sessions from:', `${API_URL}/documents/${encodedPath}/chat-sessions`)
+      
       const response = await fetch(`${API_URL}/documents/${encodedPath}/chat-sessions`)
+      console.log('Chat sessions response status:', response.status)
+      console.log('Chat sessions response ok:', response.ok)
+      
       if (response.ok) {
+        console.log('Parsing chat sessions response...')
         const data = await response.json()
+        console.log('Chat sessions data:', data)
         const chatSessions = data.chat_sessions || []
+        console.log('Number of chat sessions found:', chatSessions.length)
         
         if (chatSessions.length > 0) {
           // Get the most recent chat session (they should be ordered by created_at desc)
           const mostRecentSession = chatSessions[0]
           console.log(`Loading chat session: ${mostRecentSession.id} with ${mostRecentSession.message_count} messages`)
           await loadChatHistory(mostRecentSession.id)
+          console.log('Chat history loaded successfully')
         } else {
           // No existing chat sessions, start fresh
           console.log('No existing chat sessions found, starting fresh')
@@ -386,11 +589,16 @@ function App() {
         setCurrentChatSessionId(null)
       }
     } catch (error) {
-      console.error('Error loading most recent chat session:', error)
+      console.error('=== CHAT SESSION LOAD ERROR ===')
+      console.error('Chat session error message:', error.message)
+      console.error('Chat session error stack:', error.stack)
+      console.error('Chat session error type:', error.constructor.name)
       // Start with empty chat on error
       setChatMessages([])
       setCurrentChatSessionId(null)
     }
+    
+    console.log('=== LOAD MOST RECENT CHAT SESSION END ===')
   }
 
   // Load existing documents
@@ -708,13 +916,10 @@ function App() {
       const data = await response.json()
       console.log('Response data:', data)
       
-      // Create a blob URL for the PDF
-      // Use the file_path from the response data instead of the original filePath
-      // to ensure we're using the exact path stored in the database
+      // For existing documents, we need to fetch the file from the server
+      // since we don't have the original file object
       const storedFilePath = data.file_path || filePath
-      // Remove leading slash to avoid redirect issues with CORS
-      const cleanPath = storedFilePath.startsWith('/') ? storedFilePath.substring(1) : storedFilePath
-      const pdfResponse = await fetch(`${API_URL}/documents/${encodeURIComponent(cleanPath)}/file`)
+      const pdfResponse = await fetch(`${API_URL}/documents/${encodeURIComponent(storedFilePath)}/file`)
       if (!pdfResponse.ok) {
         throw new Error('Failed to fetch PDF file')
       }
@@ -939,16 +1144,10 @@ function App() {
       console.log('Upload response data:', data)
       console.log('File path from response:', data.file_path)
       
-      // Create a blob URL for the PDF
-      const encodedPath = encodeURIComponent(data.file_path)
-      console.log('Encoded path for fetch:', encodedPath)
-      const pdfResponse = await fetch(`${API_URL}/documents/${encodedPath}/file`)
-      if (!pdfResponse.ok) {
-        throw new Error('Failed to fetch uploaded PDF file')
-      }
-      
-      const pdfBlob = await pdfResponse.blob()
-      const blobUrl = URL.createObjectURL(pdfBlob)
+      // Use the original file that was uploaded instead of fetching it again
+      // This avoids the fetch issue and is more efficient
+      const blobUrl = URL.createObjectURL(uploadedFile)
+      console.log('Using original uploaded file, blob size:', uploadedFile.size)
       
       // Clean up previous blob URL
       if (currentBlobUrl) {
@@ -983,11 +1182,125 @@ function App() {
     }
   }
 
+  // Parse page ranges into actual ranges
+  function parsePageRanges(value) {
+    const ranges = []
+    
+    console.log('=== PAGE RANGE PARSING ===')
+    console.log('Input value:', value)
+    
+    // Use a more sophisticated approach to handle mixed content with brackets
+    let currentIndex = 0
+    const parts = []
+    
+    while (currentIndex < value.length) {
+      const char = value[currentIndex]
+      
+      if (char === '[') {
+        // Find the matching closing bracket
+        let bracketCount = 1
+        let endIndex = currentIndex + 1
+        
+        while (endIndex < value.length && bracketCount > 0) {
+          if (value[endIndex] === '[') bracketCount++
+          if (value[endIndex] === ']') bracketCount--
+          endIndex++
+        }
+        
+        if (bracketCount === 0) {
+          // Extract the complete bracketed part
+          const bracketedPart = value.substring(currentIndex, endIndex)
+          parts.push(bracketedPart)
+          currentIndex = endIndex
+        } else {
+          // Unmatched bracket, treat as regular content
+          parts.push(char)
+          currentIndex++
+        }
+      } else if (char === ';') {
+        // Skip semicolons, they're our separators
+        currentIndex++
+      } else {
+        // Collect regular content until semicolon or bracket
+        let content = ''
+        while (currentIndex < value.length && value[currentIndex] !== ';' && value[currentIndex] !== '[') {
+          content += value[currentIndex]
+          currentIndex++
+        }
+        if (content.trim()) {
+          parts.push(content.trim())
+        }
+      }
+    }
+    
+    console.log('Parsed parts:', parts)
+    
+    for (const part of parts) {
+      // Check if this part is wrapped in square brackets
+      if (part.startsWith('[') && part.endsWith(']')) {
+        // Extract content inside brackets
+        const bracketContent = part.slice(1, -1)
+        console.log('Bracket content:', bracketContent)
+        
+        // Parse the content inside brackets as individual page numbers
+        // Split by semicolon first, then by comma
+        const bracketParts = bracketContent.split(/[;,]/).map(p => p.trim()).filter(p => p)
+        console.log('Bracket parts:', bracketParts)
+        
+        const pageNumbers = []
+        for (const bracketPart of bracketParts) {
+          if (bracketPart.includes('-')) {
+            const [start, end] = bracketPart.split('-').map(num => parseInt(num.trim()))
+            if (!isNaN(start) && !isNaN(end) && start <= end) {
+              for (let i = start; i <= end; i++) {
+                if (i >= 1 && i <= numPages) {
+                  pageNumbers.push(i)
+                }
+              }
+            }
+          } else {
+            const page = parseInt(bracketPart)
+            if (!isNaN(page) && page >= 1 && page <= numPages) {
+              pageNumbers.push(page)
+            }
+          }
+        }
+        
+        // Remove duplicates and sort
+        const uniquePages = [...new Set(pageNumbers)].sort((a, b) => a - b)
+        console.log('Pages inside brackets:', uniquePages)
+        
+        if (uniquePages.length > 0) {
+          // For bracketed content, we need to send the exact pages
+          ranges.push({ type: 'specific_pages', pages: uniquePages })
+        }
+        
+      } else {
+        // Regular parsing (no brackets)
+        if (part.includes('-')) {
+          const [start, end] = part.split('-').map(num => parseInt(num.trim()))
+          if (!isNaN(start) && !isNaN(end) && start <= end) {
+            ranges.push([start, end])
+          }
+        } else {
+          const page = parseInt(part)
+          if (!isNaN(page) && page >= 1 && page <= numPages) {
+            ranges.push([page, page])
+          }
+        }
+      }
+    }
+    
+    console.log('Parsed ranges:', ranges)
+    console.log('=== END PAGE RANGE PARSING ===')
+    return ranges
+  }
+
   // Handle page range change
   function handlePageRangeChange(value) {
     setPageRangeInput(value)
     
-    // Parse page ranges
+    // Parse page ranges into individual pages for display
     const ranges = []
     const parts = value.split(/[;,]/).map(part => part.trim()).filter(part => part)
     
@@ -1021,88 +1334,128 @@ function App() {
     const userMessage = inputMessage.trim()
     setInputMessage('')
     
+    // Parse page ranges into actual ranges
+    const pageRanges = parsePageRanges(pageRangeInput)
+    
+    // Debug logging for API call tracking
+    console.log('=== FRONTEND API CALL START ===')
+    console.log('Page ranges to process:', pageRanges)
+    console.log('Message length:', userMessage.length)
+    
     // Add user message to chat
     const newUserMessage = {
       id: Date.now().toString(),
       role: 'user',
       content: userMessage,
       timestamp: new Date().toISOString(),
-      page_range: parsedPageRanges.length > 0 ? [Math.min(...parsedPageRanges), Math.max(...parsedPageRanges)] : pageRange
+      page_range: pageRanges.length > 0 ? pageRanges : [pageRange]
     }
     
     setChatMessages(prev => [...prev, newUserMessage])
     
-    // Add loading message
-    const loadingMessage = {
-      id: (Date.now() + 1).toString(),
-      role: 'assistant',
-      content: 'Thinking...',
-      timestamp: new Date().toISOString(),
-      loading: true
-    }
-    
-    setChatMessages(prev => [...prev, loadingMessage])
+    // Remove the loading message - we'll add individual responses as they come in
+    let chatSessionId = currentChatSessionId
     
     try {
-      const response = await fetch(`${API_URL}/chat`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
+      console.log(`Making ${pageRanges.length} API calls in sequence...`)
+      
+      // Make multiple API calls in sequence and display each response immediately
+      for (let i = 0; i < pageRanges.length; i++) {
+        const range = pageRanges[i]
+        
+        // Handle different range formats
+        let rangeDescription = ''
+        if (typeof range === 'object' && range.type === 'specific_pages') {
+          rangeDescription = `pages ${range.pages[0]}-${range.pages[range.pages.length-1]} (${range.pages.length} specific pages)`
+        } else if (Array.isArray(range)) {
+          rangeDescription = `pages ${range[0]}-${range[1]}`
+        } else {
+          rangeDescription = `unknown range format`
+        }
+        
+        console.log(`API call ${i + 1}/${pageRanges.length}: ${rangeDescription}`)
+        
+        // Add a loading message for this specific range
+        const rangeLoadingMessage = {
+          id: `loading-${Date.now()}-${i}`,
+          role: 'assistant',
+          content: `Thinking about ${rangeDescription}...`,
+          timestamp: new Date().toISOString(),
+          loading: true,
+          page_range: range
+        }
+        
+        setChatMessages(prev => [...prev, rangeLoadingMessage])
+        
+        // Debug: Log what we're sending to the backend
+        const requestBody = {
           message: userMessage,
           document_id: pdfInfo.file_path,
-          page_range: parsedPageRanges.length > 0 ? [Math.min(...parsedPageRanges), Math.max(...parsedPageRanges)] : pageRange,
-          chat_session_id: currentChatSessionId
+          page_range: range,
+          chat_session_id: chatSessionId
+        }
+        console.log('Sending to backend:', JSON.stringify(requestBody, null, 2))
+        
+        const response = await fetch(`${API_URL}/chat`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody)
         })
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+        }
+        
+        const data = await response.json()
+        
+        // Update chat session ID for subsequent calls
+        if (data.chat_session_id) {
+          chatSessionId = data.chat_session_id
+        }
+        
+        console.log(`API call ${i + 1} successful:`, {
+          messageLength: data.message?.length || 0,
+          referencesCount: data.references?.length || 0
+        })
+        
+        // Replace the loading message with the actual response for this range
+        setChatMessages(prev => prev.map(msg => 
+          msg.id === rangeLoadingMessage.id 
+            ? {
+                id: Date.now().toString(),
+                role: 'assistant',
+                content: data.message,
+                timestamp: new Date().toISOString(),
+                references: data.references || [],
+                page_range: range
+              }
+            : msg
+        ))
+      }
+      
+      // Update chat session ID
+      if (chatSessionId) {
+        setCurrentChatSessionId(chatSessionId)
+      }
+      
+      console.log('All API calls completed:', {
+        totalCalls: pageRanges.length
       })
-      
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-      
-      const data = await response.json()
-      
-      // Update chat session ID if provided
-      if (data.chat_session_id) {
-        setCurrentChatSessionId(data.chat_session_id)
-      }
-      
-      // Log the response data
-      console.log('=== CHAT RESPONSE DATA ===')
-      console.log('Message:', data.message)
-      console.log('References:', data.references)
-      console.log('References count:', data.references ? data.references.length : 0)
-      console.log('=== END CHAT RESPONSE DATA ===')
-      
-      // Replace loading message with actual response
-      setChatMessages(prev => prev.map(msg => 
-        msg.id === loadingMessage.id 
-          ? {
-              id: Date.now().toString(),
-              role: 'assistant',
-              content: data.message,
-              timestamp: new Date().toISOString(),
-              references: data.references || []
-            }
-          : msg
-      ))
+      console.log('=== FRONTEND API CALL END ===')
       
     } catch (error) {
       console.error('Error sending message:', error)
       
-      // Replace loading message with error
-      setChatMessages(prev => prev.map(msg => 
-        msg.id === loadingMessage.id 
-          ? {
-              id: Date.now().toString(),
-              role: 'assistant',
-              content: `Error: ${error.message}`,
-              timestamp: new Date().toISOString(),
-              error: true
-            }
-          : msg
-      ))
+      // Add error message to chat
+      setChatMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        role: 'assistant',
+        content: `Error: ${error.message}`,
+        timestamp: new Date().toISOString(),
+        error: true
+      }])
     }
   }
 
@@ -2058,14 +2411,26 @@ function App() {
                               <ReactMarkdown>{message.content}</ReactMarkdown>
                             )}
                             
-                            {message.page_range && message.page_range.length >= 2 && (
+                            {message.page_range && (
                               <div style={{ 
                                 fontSize: '12px', 
                                 color: message.role === 'user' ? 'rgba(255,255,255,0.8)' : '#6c757d', 
                                 marginTop: '8px',
                                 fontStyle: 'italic'
                               }}>
-                                Pages {message.page_range[0]}-{message.page_range[1]}
+                                {(() => {
+                                  if (Array.isArray(message.page_range) && message.page_range.length >= 2) {
+                                    return `Pages ${message.page_range[0]}-${message.page_range[1]}`
+                                  } else if (message.page_range && typeof message.page_range === 'object' && message.page_range.type === 'specific_pages' && message.page_range.pages) {
+                                    const pages = message.page_range.pages
+                                    if (pages.length === 1) {
+                                      return `Page ${pages[0]}`
+                                    } else if (pages.length > 1) {
+                                      return `Pages ${pages[0]}-${pages[pages.length-1]} (${pages.length} specific pages)`
+                                    }
+                                  }
+                                  return null
+                                })()}
                               </div>
                             )}
                             
@@ -2104,7 +2469,7 @@ function App() {
                                       textDecoration: 'underline',
                                       fontSize: '12px'
                                     }}
-                                    title={ref.context || ref.quote}
+                                    title="Click to copy quote to clipboard"
                                     onMouseEnter={(e) => {
                                       e.target.style.backgroundColor = message.role === 'user' ? 'rgba(255,255,255,0.2)' : '#e9ecef'
                                     }}
@@ -2200,7 +2565,6 @@ function App() {
                                         }, 3000)
                                       })
                                     }}
-                                    title="Click to copy quote to clipboard"
                                     >
                                       {ref.quote}
                                     </span>

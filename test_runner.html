@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multiple Page Range Test Runner</title>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .test-input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-family: inherit;
+        }
+        .test-button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        .test-button:hover {
+            background: #0056b3;
+        }
+        .test-button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .console {
+            background: #000;
+            color: #0f0;
+            padding: 15px;
+            border-radius: 4px;
+            height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+        }
+        .clear-button {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-bottom: 10px;
+        }
+        .clear-button:hover {
+            background: #c82333;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 Multiple Page Range Test Runner</h1>
+        <p>This tool tests the multiple page range functionality without making real API calls.</p>
+        <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0;">
+            <h4>📋 Usage Examples:</h4>
+            <ul style="margin: 0; padding-left: 20px;">
+                <li><strong>Multiple API calls:</strong> <code>65-113;114-135;136-152</code> → 3 separate calls</li>
+                <li><strong>Single API call (bracketed):</strong> <code>[1-3;7-9]</code> → 1 call with pages 1-9</li>
+                <li><strong>Mixed content:</strong> <code>[1-5;10;15-20;25]</code> → 1 call with pages 1-25</li>
+                <li><strong>Comma separated:</strong> <code>153-171,172-196,197-219</code> → 3 separate calls</li>
+            </ul>
+        </div>
+        
+        <div class="test-section">
+            <h3>Quick Test</h3>
+            <div>
+                <label for="pageRangeInput">Page Range Input:</label>
+                <input type="text" id="pageRangeInput" class="test-input" 
+                       value="65-113;114-135;136-152;153-171;172-196;197-219;220-234;235-259;260-270" 
+                       placeholder="e.g., 65-113;114-135;136-152 or [1-3;7-9] for single API call">
+            </div>
+            <div>
+                <label for="messageInput">Test Message:</label>
+                <input type="text" id="messageInput" class="test-input" 
+                       value="Provide a comprehensive analysis of the document" 
+                       placeholder="Enter your test message">
+            </div>
+            <button class="test-button" onclick="runQuickTest()">Run Quick Test</button>
+            <button class="test-button" onclick="runAllTests()">Run All Tests</button>
+            <button class="test-button" onclick="runPerformanceTest()">Performance Test</button>
+        </div>
+        
+        <div class="test-section">
+            <h3>Test Results</h3>
+            <div id="status" class="status info">Ready to run tests. Click a button above to start.</div>
+            <button class="clear-button" onclick="clearConsole()">Clear Console</button>
+            <div id="console" class="console">Console output will appear here...</div>
+        </div>
+    </div>
+
+    <script src="test_multiple_ranges.js"></script>
+    <script>
+        // Override console.log to capture output
+        const originalLog = console.log;
+        const originalError = console.error;
+        const consoleDiv = document.getElementById('console');
+        const statusDiv = document.getElementById('status');
+        
+        function updateStatus(message, type = 'info') {
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+        }
+        
+        function logToConsole(message, type = 'log') {
+            const timestamp = new Date().toLocaleTimeString();
+            const formattedMessage = `[${timestamp}] ${message}`;
+            consoleDiv.textContent += formattedMessage + '\n';
+            consoleDiv.scrollTop = consoleDiv.scrollHeight;
+            
+            // Also log to browser console
+            if (type === 'error') {
+                originalError(formattedMessage);
+            } else {
+                originalLog(formattedMessage);
+            }
+        }
+        
+        console.log = function(...args) {
+            logToConsole(args.join(' '));
+        };
+        
+        console.error = function(...args) {
+            logToConsole(args.join(' '), 'error');
+        };
+        
+        function clearConsole() {
+            consoleDiv.textContent = '';
+            updateStatus('Console cleared', 'info');
+        }
+        
+        async function runQuickTest() {
+            const pageRangeInput = document.getElementById('pageRangeInput').value;
+            const message = document.getElementById('messageInput').value;
+            
+            if (!pageRangeInput.trim()) {
+                updateStatus('Please enter a page range', 'error');
+                return;
+            }
+            
+            updateStatus('Running quick test...', 'info');
+            console.log('=== QUICK TEST START ===');
+            
+            try {
+                const result = await simulateMultipleAPICalls(pageRangeInput, message);
+                updateStatus(`✅ Quick test completed: ${result.totalCalls} API calls made`, 'success');
+            } catch (error) {
+                updateStatus(`❌ Quick test failed: ${error.message}`, 'error');
+                console.error('Test error:', error);
+            }
+        }
+        
+        async function runAllTests() {
+            updateStatus('Running all tests...', 'info');
+            console.log('=== RUNNING ALL TESTS ===');
+            
+            try {
+                await runTests();
+                updateStatus('✅ All tests completed successfully', 'success');
+            } catch (error) {
+                updateStatus(`❌ Tests failed: ${error.message}`, 'error');
+                console.error('Test error:', error);
+            }
+        }
+        
+        async function runPerformanceTest() {
+            updateStatus('Running performance test...', 'info');
+            console.log('=== PERFORMANCE TEST ===');
+            
+            try {
+                await performanceTest();
+                updateStatus('✅ Performance test completed', 'success');
+            } catch (error) {
+                updateStatus(`❌ Performance test failed: ${error.message}`, 'error');
+                console.error('Test error:', error);
+            }
+        }
+        
+        // Initialize
+        console.log('Test runner loaded. Ready to test multiple page range functionality.');
+        console.log('Available functions: runQuickTest(), runAllTests(), runPerformanceTest()');
+    </script>
+</body>
+</html>

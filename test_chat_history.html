@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat History Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .result {
+            background: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            margin: 10px 0;
+            white-space: pre-wrap;
+        }
+        .error {
+            background: #ffebee;
+            color: #c62828;
+        }
+        .success {
+            background: #e8f5e8;
+            color: #2e7d32;
+        }
+        button {
+            background: #2196f3;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 3px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #1976d2;
+        }
+    </style>
+</head>
+<body>
+    <h1>Chat History Test</h1>
+    
+    <div class="test-section">
+        <h3>1. Test Backend Health</h3>
+        <button onclick="testHealth()">Test Health</button>
+        <div id="health-result" class="result"></div>
+    </div>
+    
+    <div class="test-section">
+        <h3>2. Test Documents List</h3>
+        <button onclick="testDocuments()">Get Documents</button>
+        <div id="documents-result" class="result"></div>
+    </div>
+    
+    <div class="test-section">
+        <h3>3. Test Chat Sessions for Document</h3>
+        <input type="text" id="document-path" placeholder="Enter document file path" style="width: 100%; margin: 10px 0;">
+        <button onclick="testChatSessions()">Get Chat Sessions</button>
+        <div id="chat-sessions-result" class="result"></div>
+    </div>
+    
+    <div class="test-section">
+        <h3>4. Test Chat History</h3>
+        <input type="text" id="session-id" placeholder="Enter session ID" style="width: 100%; margin: 10px 0;">
+        <button onclick="testChatHistory()">Get Chat History</button>
+        <div id="chat-history-result" class="result"></div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:5001/api';
+        
+        async function testHealth() {
+            const resultDiv = document.getElementById('health-result');
+            resultDiv.textContent = 'Testing...';
+            resultDiv.className = 'result';
+            
+            try {
+                const response = await fetch(`${API_URL}/health`);
+                const data = await response.json();
+                resultDiv.textContent = JSON.stringify(data, null, 2);
+                resultDiv.className = 'result success';
+            } catch (error) {
+                resultDiv.textContent = `Error: ${error.message}`;
+                resultDiv.className = 'result error';
+            }
+        }
+        
+        async function testDocuments() {
+            const resultDiv = document.getElementById('documents-result');
+            resultDiv.textContent = 'Testing...';
+            resultDiv.className = 'result';
+            
+            try {
+                const response = await fetch(`${API_URL}/documents`);
+                const data = await response.json();
+                resultDiv.textContent = JSON.stringify(data, null, 2);
+                resultDiv.className = 'result success';
+                
+                // Auto-fill the document path if there are documents
+                if (data.documents && data.documents.length > 0) {
+                    document.getElementById('document-path').value = data.documents[0].file_path;
+                }
+            } catch (error) {
+                resultDiv.textContent = `Error: ${error.message}`;
+                resultDiv.className = 'result error';
+            }
+        }
+        
+        async function testChatSessions() {
+            const resultDiv = document.getElementById('chat-sessions-result');
+            const documentPath = document.getElementById('document-path').value;
+            
+            if (!documentPath) {
+                resultDiv.textContent = 'Please enter a document path first';
+                resultDiv.className = 'result error';
+                return;
+            }
+            
+            resultDiv.textContent = 'Testing...';
+            resultDiv.className = 'result';
+            
+            try {
+                // Remove leading slash if present for the API call
+                const cleanPath = documentPath.startsWith('/') ? documentPath.substring(1) : documentPath;
+                const encodedPath = encodeURIComponent(cleanPath);
+                
+                const response = await fetch(`${API_URL}/documents/${encodedPath}/chat-sessions`);
+                const data = await response.json();
+                resultDiv.textContent = JSON.stringify(data, null, 2);
+                resultDiv.className = 'result success';
+                
+                // Auto-fill the session ID if there are sessions
+                if (data.chat_sessions && data.chat_sessions.length > 0) {
+                    document.getElementById('session-id').value = data.chat_sessions[0].id;
+                }
+            } catch (error) {
+                resultDiv.textContent = `Error: ${error.message}`;
+                resultDiv.className = 'result error';
+            }
+        }
+        
+        async function testChatHistory() {
+            const resultDiv = document.getElementById('chat-history-result');
+            const sessionId = document.getElementById('session-id').value;
+            
+            if (!sessionId) {
+                resultDiv.textContent = 'Please enter a session ID first';
+                resultDiv.className = 'result error';
+                return;
+            }
+            
+            resultDiv.textContent = 'Testing...';
+            resultDiv.className = 'result';
+            
+            try {
+                const response = await fetch(`${API_URL}/chat/sessions/${sessionId}`);
+                const data = await response.json();
+                resultDiv.textContent = JSON.stringify(data, null, 2);
+                resultDiv.className = 'result success';
+            } catch (error) {
+                resultDiv.textContent = `Error: ${error.message}`;
+                resultDiv.className = 'result error';
+            }
+        }
+        
+        // Auto-run health test on page load
+        window.onload = function() {
+            testHealth();
+        };
+    </script>
+</body>
+</html>

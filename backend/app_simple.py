@@ -627,6 +627,20 @@ def chat():
         page_range = data.get('page_range', [1, 1])
         chat_session_id = data.get('chat_session_id')
         
+        # Debug logging for API call tracking
+        logger.info("=== GEMINI API CALL START ===")
+        logger.info(f"Document: {document_id}")
+        logger.info(f"Page range: {page_range}")
+        logger.info(f"Page range type: {type(page_range)}")
+        if isinstance(page_range, dict):
+            logger.info(f"Page range keys: {list(page_range.keys())}")
+            if 'pages' in page_range:
+                logger.info(f"Specific pages count: {len(page_range['pages'])}")
+                logger.info(f"First 10 pages: {page_range['pages'][:10]}")
+                logger.info(f"Last 10 pages: {page_range['pages'][-10:]}")
+        logger.info(f"Message length: {len(message)} characters")
+        logger.info(f"Chat session ID: {chat_session_id}")
+        
         if not message or not document_id:
             return jsonify({'error': 'Message and document_id are required'}), 400
         
@@ -657,16 +671,33 @@ def chat():
         save_chat_message(user_message_data)
         
         # Prepare context text based on page range
-        if page_range and len(page_range) >= 2:
+        if page_range and isinstance(page_range, dict) and page_range.get('type') == 'specific_pages':
+            # Handle specific pages list (bracketed input)
+            specific_pages = page_range.get('pages', [])
+            logger.info(f"Processing specific pages: {len(specific_pages)} pages requested")
+            logger.info(f"Specific pages range: {min(specific_pages)}-{max(specific_pages)}")
+            if document.get('pages'):
+                context_pages = [page for page in document['pages'] if page['page_number'] in specific_pages]
+                logger.info(f"Found {len(context_pages)} matching pages in document")
+                context_text = "\n".join([f"--- Page {page['page_number']} ---\n{page['text_content']}" for page in context_pages])
+                logger.info(f"Context prepared: specific pages {min(specific_pages)}-{max(specific_pages)} ({len(context_pages)} pages, {len(context_text)} characters)")
+            else:
+                context_text = document['text_content']
+                logger.info(f"Context prepared: full document ({len(context_text)} characters)")
+        elif page_range and len(page_range) >= 2:
+            # Handle regular range
             start_page = max(1, page_range[0])
             end_page = min(document.get('num_pages', 999), page_range[1])
             if document.get('pages'):
                 context_pages = [page for page in document['pages'] if start_page <= page['page_number'] <= end_page]
                 context_text = "\n".join([f"--- Page {page['page_number']} ---\n{page['text_content']}" for page in context_pages])
+                logger.info(f"Context prepared: pages {start_page}-{end_page} ({len(context_pages)} pages, {len(context_text)} characters)")
             else:
                 context_text = document['text_content']
+                logger.info(f"Context prepared: full document ({len(context_text)} characters)")
         else:
             context_text = document['text_content']
+            logger.info(f"Context prepared: full document ({len(context_text)} characters)")
         
         # Prepare prompt for structured response with references
         prompt = f"""You are an expert academic professor explaining to a graduate student. The user uploaded a PDF. Here is the document content:
@@ -680,6 +711,7 @@ For every claim or point in your answer, please provide the exact supporting sen
 Please provide a comprehensive answer with specific references to the source material."""
         
         # Get structured response from Gemini with references
+        logger.info("Making Gemini API call...")
         try:
             response = model.generate_content(
                 prompt,
@@ -696,13 +728,8 @@ Please provide a comprehensive answer with specific references to the source mat
                 content = response_json.get('answer', '')
                 references = response_json.get('references', [])
                 
-                # Log the structured response
-                logger.info("=== STRUCTURED GEMINI RESPONSE ===")
-                logger.info(f"Answer length: {len(content)} characters")
-                logger.info(f"Answer content: {content}")
-                logger.info(f"References count: {len(references)}")
-                logger.info(f"References: {references}")
-                logger.info("=== END STRUCTURED GEMINI RESPONSE ===")
+                # Log the structured response summary
+                logger.info(f"Gemini API call successful: {len(content)} characters, {len(references)} references")
                 
             except json.JSONDecodeError as e:
                 logger.error(f"JSON decode error: {e}")
@@ -729,6 +756,8 @@ Please provide a comprehensive answer with specific references to the source mat
             'references': references
         }
         save_chat_message(assistant_message_data)
+        
+        logger.info("=== GEMINI API CALL END ===")
         
         return jsonify({
             'message': content,
@@ -772,7 +801,16 @@ def get_chat_sessions_for_document_endpoint(file_path):
         # Decode the file path from URL using proper URL decoding
         file_path = urllib.parse.unquote(file_path)
         
+        # Add leading slash if not present to match database format
+        if not file_path.startswith('/'):
+            file_path = '/' + file_path
+        
+        logger.info(f"=== GET CHAT SESSIONS FOR DOCUMENT ===")
+        logger.info(f"Requested file path: {file_path}")
+        
         sessions = get_chat_sessions_for_document(file_path)
+        logger.info(f"Found {len(sessions)} chat sessions for document")
+        
         return jsonify({'chat_sessions': sessions}), 200
     except Exception as e:
         logger.error(f"Error getting chat sessions: {e}")
